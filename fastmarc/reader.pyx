@@ -233,6 +233,34 @@ cdef class MARCReader:
 
         return pymarc.Record(data=raw)
 
+    
+    def get_record(self, Py_ssize_t idx):
+        """
+        Return the pymarc.Record at the given index.
+
+        This is O(1): it uses the precomputed offset/length index
+        instead of iterating.
+        """
+        if idx < 0 or idx >= self._n:
+            raise IndexError("Record index out of range")
+
+        cdef size_t pos = self._offsets[idx]
+        cdef int L = self._lengths[idx]
+        cdef Py_ssize_t p
+        cdef Py_ssize_t q
+
+        if self._mm is not None:
+            p = <Py_ssize_t>pos
+            q = p + <Py_ssize_t>L
+            raw = bytes(self._mm[p:q])
+        else:
+            self.fp.seek(pos, io.SEEK_SET)
+            raw = self.fp.read(L)
+
+        return pymarc.Record(data=raw)
+
+
+
     # ---- helpers -----------------------------------------------------------
 
     def get_seek_map(self):
