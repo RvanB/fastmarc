@@ -13,35 +13,16 @@ from cpython.long cimport PyLong_FromSize_t
 
 
 cdef class MARCReader:
-    """
-    Fast MARC reader that:
-      - Scans once to build C arrays of (offset, length) for each record.
-      - Keeps an mmap alive (when possible) so iteration slices bytes directly
-        from memory (no seeks/reads per record).
-      - Yields pymarc.Record objects on iteration.
 
-    Public API:
-      - FastMARCReader(fp)
-      - for rec in FastMARCReader(fp):  # rec is pymarc.Record
-      - len(reader)                     # number of records
-      - reader.get_seek_map()           # [offset0, offset1, ...]
-      - reader.close()                  # releases mmap and C buffers
-    """
-
-    # Python attributes
     cdef public object fp
     cdef public object _mm
 
-    # C-level index storage
     cdef size_t* _offsets
-    cdef int*    _lengths          # MARC length <= 99999 fits in int
+    cdef int*    _lengths
     cdef Py_ssize_t _n
     cdef Py_ssize_t _cap
 
-    # iteration cursor
     cdef Py_ssize_t _i
-
-    # ---- lifecycle ---------------------------------------------------------
 
     def __cinit__(self, fp, **kwargs):
         self.fp = fp
@@ -74,8 +55,6 @@ cdef class MARCReader:
 
     def __dealloc__(self):
         self.close()
-
-    # ---- internal: dynamic array helpers ----------------------------------
 
     cdef void _reserve(self, Py_ssize_t needed):
         """Ensure capacity for at least `needed` items in both arrays."""
@@ -117,21 +96,7 @@ cdef class MARCReader:
         self._lengths[self._n] = L
         self._n += 1
 
-    # ---- indexing ----------------------------------------------------------
-
     cdef void _build_index(self):
-        """
-        Build arrays of (offset, length) for each MARC record.
-
-        Fast path:
-          - Use mmap + a typed memoryview; compute lengths from 5 ASCII digits.
-          - Append (i, L) and advance i by L until exhausted.
-          - Keep the mmap *open* for iteration (zero-seek, zero-read).
-
-        Fallback:
-          - Seek/stream once; read 5-byte leader per record to get L.
-          - Append (pos, L) and seek forward L-5.
-        """
         cdef Py_ssize_t i = 0
         cdef Py_ssize_t size = 0
         cdef Py_ssize_t hint = 0
@@ -139,7 +104,6 @@ cdef class MARCReader:
         cdef object mm = None
         cdef const uint8_t[:] buf
 
-        # ------- Try mmap fast path -------
         try:
             fileno = self.fp.fileno()
             mm = mmap.mmap(fileno, 0, access=mmap.ACCESS_READ)
@@ -158,7 +122,7 @@ cdef class MARCReader:
                      (buf[i+1] - 48) * 1000  +
                      (buf[i+2] - 48) * 100   +
                      (buf[i+3] - 48) * 10    +
-                      buf[i+4] - 48)
+                     buf[i+4] - 48)
 
                 if L <= 0 or i + L > size:
                     break
@@ -177,7 +141,6 @@ cdef class MARCReader:
                 pass
             self._mm = None
 
-        # ------- Fallback: sequential scan -------
         self.fp.seek(0, io.SEEK_SET)
         cdef long pos
         cdef bytes head
@@ -196,21 +159,11 @@ cdef class MARCReader:
             self.fp.seek(L - 5, io.SEEK_CUR)
         self.fp.seek(0, io.SEEK_SET)
 
-    # ---- iteration ---------------------------------------------------------
-
     def __iter__(self):
         self._i = 0
         return self
 
     def __next__(self):
-        """
-        Return the next pymarc.Record.
-
-        Using mmap:
-          - bytes(self._mm[pos:pos+L]) → single copy from RAM.
-        Fallback:
-          - Single seek to pos + single read of L bytes.
-        """
         cdef Py_ssize_t idx = self._i
         cdef size_t pos
         cdef int L
@@ -235,12 +188,7 @@ cdef class MARCReader:
 
     
     def get_record(self, Py_ssize_t idx):
-        """
-        Return the pymarc.Record at the given index.
-
-        This is O(1): it uses the precomputed offset/length index
-        instead of iterating.
-        """
+        """Return the pymarc.Record at the given index."""
         if idx < 0 or idx >= self._n:
             raise IndexError("Record index out of range")
 
@@ -259,15 +207,8 @@ cdef class MARCReader:
 
         return pymarc.Record(data=raw)
 
-
-
-    # ---- helpers -----------------------------------------------------------
-
     def get_seek_map(self):
-        """
-        Return Python list of record start offsets.
-        Built with C-API (PyList_New/SET_ITEM) for speed.
-        """
+        """Return Python list of record start offsets"""
         cdef Py_ssize_t n = self._n
         cdef object out = PyList_New(n)
         cdef Py_ssize_t j
