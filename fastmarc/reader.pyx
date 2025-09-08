@@ -207,14 +207,18 @@ cdef class MARCReader:
 
         return pymarc.Record(data=raw)
 
+
     def get_seek_map(self):
-        """Return Python list of record start offsets"""
+        """
+        Return Python list of record start offsets.
+        """
         cdef Py_ssize_t n = self._n
-        cdef object out = PyList_New(n)
+        cdef list out = [0] * n
         cdef Py_ssize_t j
         for j in range(n):
-            PyList_SET_ITEM(out, j, PyLong_FromSize_t(self._offsets[j]))
+            out[j] = self._offsets[j]
         return out
+
 
     def __len__(self):
         return self._n
