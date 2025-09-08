@@ -15,17 +15,9 @@ You can get the number of records with ~len(reader)~ *without parsing a single r
 *** Same iteration speed as ~pymarc.MARCReader~
 Iterating through ~fastmarc.FastMARCReader~ yields ~pymarc.Record~ objects at the same throughput as ~pymarc.MARCReader~, because parsing is still handled by pymarc internally.
 
-*** Random access by record index → file position
-  ~get_seek_map()~ gives you the exact byte offset of every record in the file. This means you can jump straight to record /N/ in O(1) time without:
-- loading the entire file into memory,
-- or iterating through all preceding records.
-
-*** Memory efficient with ~mmap~
-Files are memory-mapped instead of fully loaded. Only the pages you touch are read from disk, making it feasible to work with multi-GB MARC collections.
-
-*** Reusable index
-The record offset/length index is built once and reused for iteration, random access, or record counts.  
-If you iterate multiple times over the same file, there is no re-parsing overhead.
+*** Random access by record index to file position
+- ~get_seek_map()~ gives you the exact byte offset of every record in the file.
+- ~get_record(i)~ returns the pymarc.Record for the record at index ~i~ without parsing any other records
 
 *** Drop-in compatibility
 Iteration still yields ~pymarc.Record~ objects, so you can keep using existing ~pymarc~ workflows without modification.
@@ -43,7 +35,6 @@ With ~fastmarc~ you can:
 - Check the number of records almost instantly.  
 - Jump to any record’s byte position in constant time.  
 - Iterate with the same speed as ~pymarc~ but without losing indexing metadata.  
-- Handle very large MARC files efficiently using memory mapping.
 
 ** Installation
 
