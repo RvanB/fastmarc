@@ -1,0 +1,75 @@
+#+OPTIONS: toc:nil
+
+* fastmarc
+
+A high-performance MARC file reader built on top of [[https://gitlab.com/pymarc/pymarc][pymarc]], written with Cython and memory-mapped I/O.  
+
+~fastmarc~ gives you the ability to *index, count, and retrieve MARC records* in ways that are not possible with vanilla ~pymarc~, while still remaining fully compatible with ~pymarc.Record~.
+
+** Features
+
+*** Instant record counts (~__len__~)
+The entire file is scanned once using a lightweight Cython indexer.
+You can get the number of records with ~len(reader)~ *without parsing a single record*.
+
+*** Same iteration speed as ~pymarc.MARCReader~
+Iterating through ~fastmarc.FastMARCReader~ yields ~pymarc.Record~ objects at the same throughput as ~pymarc.MARCReader~, because parsing is still handled by pymarc internally.
+
+*** Random access by record index → file position
+  ~get_seek_map()~ gives you the exact byte offset of every record in the file. This means you can jump straight to record /N/ in O(1) time without:
+- loading the entire file into memory,
+- or iterating through all preceding records.
+
+*** Memory efficient with ~mmap~
+Files are memory-mapped instead of fully loaded. Only the pages you touch are read from disk, making it feasible to work with multi-GB MARC collections.
+
+*** Reusable index
+The record offset/length index is built once and reused for iteration, random access, or record counts.  
+If you iterate multiple times over the same file, there is no re-parsing overhead.
+
+*** Drop-in compatibility
+Iteration still yields ~pymarc.Record~ objects, so you can keep using existing ~pymarc~ workflows without modification.
+
+********** Why use fastmarc?
+
+If you work with large MARC files (hundreds of MBs to many GBs), ~pymarc~ can be limiting:
+
+- Counting records requires iterating through and parsing them all.  
+- Random access is not possible — you must walk the file sequentially.  
+- Large files can take minutes just to "skip ahead."
+
+With ~fastmarc~ you can:
+
+- Check the number of records almost instantly.  
+- Jump to any record’s byte position in constant time.  
+- Iterate with the same speed as ~pymarc~ but without losing indexing metadata.  
+- Handle very large MARC files efficiently using memory mapping.
+
+** Installation
+
+~fastmarc~ is still in development and not yet published to PyPI.  
+For now, you’ll need to install it from this repository:
+
+#+begin_src bash
+  pip install git+https://github.com/RvanB/fastmarc.git
+#+end_src
+
+** Usage
+
+#+begin_src python
+  from fastmarc.reader import MARCReader
+
+  with open("records.mrc", "rb") as f:
+  reader = MARCReader(f)
+
+  # Record count instantly (no parsing)
+  print(len(reader))
+
+  # Iterate through records (same as pymarc)
+  for rec in reader:
+  print(rec["245"]["a"])
+
+  # Get the byte offset of record 100
+  offsets = reader.get_seek_map()
+  print("Record 100 starts at byte:", offsets[100])
+#+end_src
