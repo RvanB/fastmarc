@@ -57,7 +57,7 @@ For now, you’ll need to install it from this repository:
 ** Usage
 
 #+begin_src python
-  from fastmarc.reader import MARCReader
+  from fastmarc import MARCReader
 
   with open("records.mrc", "rb") as f:
   reader = MARCReader(f)
