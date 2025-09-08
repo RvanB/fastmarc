@@ -30,7 +30,7 @@ If you iterate multiple times over the same file, there is no re-parsing overhea
 *** Drop-in compatibility
 Iteration still yields ~pymarc.Record~ objects, so you can keep using existing ~pymarc~ workflows without modification.
 
-*** Why use fastmarc?
+** Why use fastmarc?
 
 If you work with large MARC files (hundreds of MBs to many GBs), ~pymarc~ can be limiting:
 
