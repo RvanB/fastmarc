@@ -3,14 +3,11 @@
 import io
 import mmap
 import pymarc
-cimport cython
 
 from libc.stdlib cimport malloc, realloc, free
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t
 from libc.stddef cimport size_t
 from libc.string cimport memset
-from cpython.list cimport PyList_New, PyList_SET_ITEM
-from cpython.long cimport PyLong_FromSize_t
 
 # ============================================================================
 # Low-level MARC parsing helpers
@@ -164,10 +161,6 @@ cdef bint record_contains(const unsigned char* rec_ptr, Py_ssize_t reclen,
 # Bitmask indexing helpers
 # ============================================================================
 
-# ============================================================================
-# Bitmask indexing helpers
-# ============================================================================
-
 # Global state for mask type and custom character mapping
 cdef int _mask_type = 3  # 0=uint8, 1=uint16, 2=uint32, 3=uint64, 4=multi-uint64
 cdef int _mask_bytes_per_record = 8  # Bytes per mask
@@ -229,7 +222,6 @@ cdef inline int _map_char(uint8_t ch) nogil:
 # MARCReader class
 # ============================================================================
 
-
 cdef class MARCReader:
 
     cdef public object fp
@@ -250,8 +242,7 @@ cdef class MARCReader:
     cdef list _index_fields
     cdef str _charset  # Custom charset (if any)
 
-    def __cinit__(self, fp, enable_indexing=False, index_fields=None, mask_lanes=None, 
-                  charset=None, **kwargs):
+    def __cinit__(self, fp, enable_indexing=False, index_fields=None, charset=None, **kwargs):
         self.fp = fp
         self._mm = None
         self._offsets = <size_t*> NULL
@@ -270,9 +261,6 @@ cdef class MARCReader:
                 # Custom charset - calculate minimum bits needed
                 charset_len = len(set(charset))
                 self._bits_per_mask = charset_len + 1  # +1 for fallback
-            elif mask_lanes is not None:
-                # Explicit mask_lanes provided (legacy parameter)
-                self._bits_per_mask = mask_lanes * 64
             else:
                 # Default: 256 bits
                 self._bits_per_mask = 256
@@ -295,7 +283,7 @@ cdef class MARCReader:
             
         self._index_fields = list(index_fields) if index_fields else ["001", "245$a"]
 
-    def __init__(self, fp, enable_indexing=False, index_fields=None, mask_lanes=None,
+    def __init__(self, fp, enable_indexing=False, index_fields=None,
                  charset=None, **kwargs):
         global _custom_char_map, _custom_fallback_bit
         
