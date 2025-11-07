@@ -4,11 +4,11 @@ from Cython.Build import cythonize
 
 extensions = [
     Extension(
-        name="fastmarc.reader",        # package.module
+        name="fastmarc.reader",
         sources=["fastmarc/reader.pyx"],
-        language="c",                  # change to "c++" if your .pyx uses C++
-        # extra_compile_args=[], extra_link_args=[],
-    )
+        language="c",
+        extra_compile_args=["-O3"],  # Optimize for speed
+    ),
 ]
 
 setup(
@@ -22,6 +22,7 @@ setup(
             "boundscheck": False,
             "wraparound": False,
             "cdivision": True,
+            "initializedcheck": False,
         },
     ),
     install_requires=["pymarc>=5.1"],
