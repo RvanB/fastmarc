@@ -313,7 +313,7 @@ cdef class MARCReader:
     cdef public dict _exact_indexes           # field_spec -> dict of value -> list of indices
     cdef list _exact_fields            # List of (tag_bytes, subfield_byte, field_spec) for exact indexing
 
-    def __cinit__(self, fp, charset=None, **kwargs):
+    def __cinit__(self, fp, **kwargs):
         self.fp = fp
         self._mm = None
         self._offsets = <size_t*> NULL
@@ -321,53 +321,23 @@ cdef class MARCReader:
         self._n = 0
         self._cap = 0
         self._i = 0
-        
+
         # Indexing inactive until .index() invoked
         self._indexing_enabled = False
         self._index_built = False
         self._masks = NULL
-        self._charset = charset
+        self._charset = None
         self._bits_per_mask = 0
         self._mask_bytes_per_record = 0
         self._index_fields = []  # Will be populated via .index(*fields)
         self._exact_fields = []  # Will be populated via .add_index(field, fuzzy=False)
 
-    def __init__(self, fp, charset=None, **kwargs):
-        global _custom_char_map, _custom_fallback_bit
-        
+    def __init__(self, fp, **kwargs):
         # Initialize field hooks dict
         self._field_hooks = {}
         self._multi_field_hooks = []
         self._exact_indexes = {}  # field_spec -> {value: [idx1, idx2, ...]}
-        
-        # Setup custom character mapping if provided
-        cdef int i
-        cdef int ch_byte
-        
-        if charset is not None:
-            _custom_fallback_bit = -1
-            # Initialize map to -1 (unmapped)
-            for i in range(256):
-                _custom_char_map[i] = -1
-            
-            # Map each character in charset to a bit position
-            unique_chars = list(set(charset))
-            for i, char in enumerate(unique_chars):
-                ch_byte = ord(char)
-                _custom_char_map[ch_byte] = i
-                # Also map uppercase if lowercase
-                if 97 <= ch_byte <= 122:  # a-z
-                    _custom_char_map[ch_byte - 32] = i  # Map A-Z to same bit
-                elif 65 <= ch_byte <= 90:  # A-Z
-                    _custom_char_map[ch_byte + 32] = i  # Map a-z to same bit
-            
-            # Set fallback bit
-            _custom_fallback_bit = len(unique_chars)
-        else:
-            # Reset to use default mapping
-            _custom_fallback_bit = -1
-            _custom_char_map[0] = -1
-        
+
     # No automatic indexing: user must call .index() to build & run hooks.
 
     def add_index(self, field_spec, fuzzy=None):
@@ -427,31 +397,76 @@ cdef class MARCReader:
         
         return self
 
-    def build_index(self, field_specs=None):
+    def _setup_charset(self, charset):
+        """Setup custom character mapping for fuzzy indexing.
+
+        Args:
+            charset: String containing characters to index
+        """
+        global _custom_char_map, _custom_fallback_bit
+
+        cdef int i
+        cdef int ch_byte
+
+        _custom_fallback_bit = -1
+        # Initialize map to -1 (unmapped)
+        for i in range(256):
+            _custom_char_map[i] = -1
+
+        # Map each character in charset to a bit position
+        unique_chars = list(set(charset))
+        for i, char in enumerate(unique_chars):
+            ch_byte = ord(char)
+            _custom_char_map[ch_byte] = i
+            # Also map uppercase if lowercase
+            if 97 <= ch_byte <= 122:  # a-z
+                _custom_char_map[ch_byte - 32] = i  # Map A-Z to same bit
+            elif 65 <= ch_byte <= 90:  # A-Z
+                _custom_char_map[ch_byte + 32] = i  # Map a-z to same bit
+
+        # Set fallback bit
+        _custom_fallback_bit = len(unique_chars)
+
+    def build_index(self, field_specs=None, charset=None):
         """
         Build the record index and run field hooks (explicit only).
         Must be invoked before using search(), len(), get_record(), or relying
         on hooks. Streaming iteration without calling .index() is supported
         but will NOT execute hooks.
-        
+
         Args:
             field_specs: Optional field specifications to add to fuzzy index
                         (for backward compatibility with .index("245$a", ...) pattern)
-        
+            charset: Optional custom character set for fuzzy indexing. If provided,
+                    only these characters will be indexed for fuzzy search.
+
         Returns:
             self (for method chaining)
         """
         if not self._index_built:
+            # Store charset if provided
+            if charset is not None:
+                self._charset = charset
+
+            # Setup custom character mapping if charset provided
+            global _custom_char_map, _custom_fallback_bit
+            if self._charset is not None:
+                self._setup_charset(self._charset)
+            else:
+                # Reset to use default mapping
+                _custom_fallback_bit = -1
+                _custom_char_map[0] = -1
+
             # Handle old-style .index("field1", "field2") calls
             if field_specs is not None:
                 for fs in field_specs:
                     self.add_index(fs)  # Use add_index with auto-detect
-            
+
             # If no indexes added at all, use defaults
             if not self._index_fields and not self._exact_fields:
                 self.add_index("001")      # Default: exact (control field)
                 self.add_index("245$a")    # Default: fuzzy (data field)
-            
+
             # Enable indexing if we have fuzzy fields
             if self._index_fields and not self._indexing_enabled:
                 self._indexing_enabled = True
@@ -471,28 +486,37 @@ cdef class MARCReader:
                     self._mask_bytes_per_record = 8
                 else:
                     self._mask_bytes_per_record = ((self._bits_per_mask + 63)//64)*8
-            
+
             self._build_index()
             self._build_masks()
             self._index_built = True
         return self
     
-    def index(self, *field_specs):
+    def index(self, *field_specs, charset=None):
         """
         Build the index and run all field hooks.
         Explicit call required – no automatic build on iteration.
-        
+
+        Args:
+            *field_specs: Optional field specifications to add to fuzzy index
+            charset: Optional custom character set for fuzzy indexing
+
         Example:
             subjects = FieldCounter()
             reader = (MARCReader(fp)
                 .hook("650$a", subjects)
                 .index())
             print(subjects.counts.most_common(10))
-        
+
+            # With custom charset
+            reader = (MARCReader(fp)
+                .add_index("245$a")
+                .index(charset="abcdefghijklmnopqrstuvwxyz0123456789"))
+
         Returns:
             self (for method chaining)
         """
-        return self.build_index(field_specs if field_specs else None)
+        return self.build_index(field_specs if field_specs else None, charset=charset)
     
     def build(self):
         """
