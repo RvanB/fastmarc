@@ -12,7 +12,7 @@ A high-performance MARC file reader built on top of [[https://gitlab.com/pymarc/
 The entire file is scanned once using a lightweight Cython indexer.
 You can get the number of records with ~len(reader)~ *without parsing a single record*.
 
-*** Same iteration speed as ~pymarc.MARCReader~
+      reader = MARCReader(f).index("245$a", "008", "264$c")  # Explicit indexing (required for search & hooks)
 Iterating through ~fastmarc.FastMARCReader~ yields ~pymarc.Record~ objects at the same throughput as ~pymarc.MARCReader~, because parsing is still handled by pymarc internally.
 
 *** Random access by record index to file position
@@ -24,8 +24,48 @@ Iteration still yields ~pymarc.Record~ objects, so you can keep using existing ~
 
 ** Why use fastmarc?
 
-If you work with large MARC files (hundreds of MBs to many GBs), ~pymarc~ can be limiting:
+      # Search (only works for fields included in .index())
+      matches = reader.search("245", "a", "music")
+      print("Found", len(matches), "titles with 'music'")
 
+      # Get the 100th record (random access)
+      print(reader.get_record(99))
+
+      # Multi-field hooks example:
+      # reader.hook_multi(["008", "264$c"], lambda values: ... )
+      # reader.index("008", "264$c")  # Will invoke the multi-field hook once per record
+#+end_src
+
+** Explicit Indexing & Hooks
+
+You MUST call ~.index(...)~ before using:
+- ~len(reader)~
+- ~search()~
+- hooks (~hook~, ~hook_multi~)
+
+If you call ~index()~ with no arguments, a small default set ("001", "245$a") is used.
+
+** Development Environment (uv)
+
+We recommend using [[https://github.com/astral-sh/uv][uv]] for a fast Python environment + dependency management.
+
+#+begin_src bash
+  # Install uv (macOS/Linux)
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  # Create & sync environment (reads pyproject.toml)
+  uv sync
+
+  # Build Cython extension in-place
+  uv run python setup.py build_ext --inplace
+
+  # Run tests
+  uv run python test_analyzers.py
+#+end_src
+
+To run an ad-hoc script:
+#+begin_src bash
+  uv run python test.py
 - Counting records requires iterating through and parsing them all.  
 - Random access is not possible — you must walk the file sequentially.  
 - Large files can take minutes just to "skip ahead."

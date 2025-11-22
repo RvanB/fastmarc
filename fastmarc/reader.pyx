@@ -157,6 +157,70 @@ cdef bint record_contains(const unsigned char* rec_ptr, Py_ssize_t reclen,
     
     return _memmem_icase(ptr, length, ndl, nlen)
 
+cdef list get_subfields(const unsigned char* rec_ptr, Py_ssize_t reclen,
+                        bytes tag, char subfield):
+    """Return all occurrences of a tag/subfield as a list of bytes objects.
+
+    For control fields (00X) or when subfield == 0, each field occurrence is
+    returned as a single bytes value (entire field up to 0x1E terminator).
+    For data fields, each matching subfield occurrence is returned.
+    If no occurrences exist, returns an empty list.
+    """
+    cdef list out = []
+    cdef const unsigned char* tag3 = <const unsigned char*> tag
+    cdef int base = _atoi5(rec_ptr + 12)
+    cdef int dirlen
+    cdef const unsigned char* dirp
+    cdef int i = 0, flen = 0, pos = 0, j = 0, k = 0
+    cdef const unsigned char* field
+    cdef bint is_control
+
+    if reclen < 24 or base <= 24 or base > reclen:
+        return out
+    dirp = rec_ptr + 24
+    dirlen = base - 24
+    is_control = _is_control_tag(tag3) or subfield == 0
+
+    while i < dirlen:
+        if _tag_eq3(dirp + i, tag3):
+            flen = _atoi4(dirp + i + 3)
+            pos  = _atoi5(dirp + i + 7)
+            if base + pos >= reclen or flen <= 0:
+                i += 12
+                continue
+            field = rec_ptr + base + pos
+            if is_control:
+                # Entire field until 0x1E
+                j = 0
+                while j < flen and field[j] != 0x1E:
+                    j += 1
+                out.append(<bytes> field[:j])
+            else:
+                # Scan indicators then subfields
+                j = 2
+                while j < flen:
+                    if field[j] == 0x1F:  # subfield delimiter
+                        if j + 1 < flen:
+                            if field[j + 1] == <uint8_t> subfield:
+                                j += 2
+                                k = j
+                                while k < flen and field[k] not in (0x1F, 0x1E):
+                                    k += 1
+                                out.append(<bytes> field[j:k])
+                                j = k
+                                continue
+                            else:
+                                j += 2
+                                continue
+                        else:
+                            break
+                    elif field[j] == 0x1E:
+                        break
+                    else:
+                        j += 1
+        i += 12
+    return out
+
 # ============================================================================
 # Bitmask indexing helpers
 # ============================================================================
@@ -234,15 +298,22 @@ cdef class MARCReader:
 
     cdef Py_ssize_t _i
     
-    # Optional indexing support
-    cdef bint _indexing_enabled
-    cdef void* _masks  # Type depends on _mask_bytes_per_record
-    cdef int _mask_bytes_per_record  # Bytes per mask (1, 2, 4, 8, or multiples of 8)
-    cdef int _bits_per_mask  # Total bits needed
-    cdef list _index_fields
-    cdef str _charset  # Custom charset (if any)
+    # Explicit indexing (inactive until .index() is called)
+    cdef bint _indexing_enabled        # Set True when user calls .index()
+    cdef bint _index_built             # Whether index + hooks have run
+    cdef void* _masks                  # Allocated after indexing enabled
+    cdef int _mask_bytes_per_record    # Bytes per mask (computed at .index())
+    cdef int _bits_per_mask            # Bits required (computed at .index())
+    cdef list _index_fields            # Fields used for fuzzy bitmask indexing
+    cdef str _charset                  # Optional custom charset
+    cdef dict _field_hooks             # Field spec -> list of hook callables
+    cdef list _multi_field_hooks       # (list[field_specs], hook_callable) per record
+    
+    # Exact indexing (hash map: field_spec -> {value: [idx, idx, ...]})
+    cdef public dict _exact_indexes           # field_spec -> dict of value -> list of indices
+    cdef list _exact_fields            # List of (tag_bytes, subfield_byte, field_spec) for exact indexing
 
-    def __cinit__(self, fp, enable_indexing=False, index_fields=None, charset=None, **kwargs):
+    def __cinit__(self, fp, charset=None, **kwargs):
         self.fp = fp
         self._mm = None
         self._offsets = <size_t*> NULL
@@ -251,47 +322,29 @@ cdef class MARCReader:
         self._cap = 0
         self._i = 0
         
-        # Indexing
-        self._indexing_enabled = enable_indexing
+        # Indexing inactive until .index() invoked
+        self._indexing_enabled = False
+        self._index_built = False
         self._masks = NULL
         self._charset = charset
-        
-        if enable_indexing:
-            if charset is not None:
-                # Custom charset - calculate minimum bits needed
-                charset_len = len(set(charset))
-                self._bits_per_mask = charset_len + 1  # +1 for fallback
-            else:
-                # Default: 256 bits
-                self._bits_per_mask = 256
-                
-            # Calculate bytes per mask based on bits needed
-            if self._bits_per_mask <= 8:
-                self._mask_bytes_per_record = 1  # uint8_t
-            elif self._bits_per_mask <= 16:
-                self._mask_bytes_per_record = 2  # uint16_t
-            elif self._bits_per_mask <= 32:
-                self._mask_bytes_per_record = 4  # uint32_t
-            elif self._bits_per_mask <= 64:
-                self._mask_bytes_per_record = 8  # uint64_t
-            else:
-                # Multi-uint64: round up to multiple of 8
-                self._mask_bytes_per_record = ((self._bits_per_mask + 63) // 64) * 8
-        else:
-            self._bits_per_mask = 0
-            self._mask_bytes_per_record = 0
-            
-        self._index_fields = list(index_fields) if index_fields else ["001", "245$a"]
+        self._bits_per_mask = 0
+        self._mask_bytes_per_record = 0
+        self._index_fields = []  # Will be populated via .index(*fields)
+        self._exact_fields = []  # Will be populated via .add_index(field, fuzzy=False)
 
-    def __init__(self, fp, enable_indexing=False, index_fields=None,
-                 charset=None, **kwargs):
+    def __init__(self, fp, charset=None, **kwargs):
         global _custom_char_map, _custom_fallback_bit
+        
+        # Initialize field hooks dict
+        self._field_hooks = {}
+        self._multi_field_hooks = []
+        self._exact_indexes = {}  # field_spec -> {value: [idx1, idx2, ...]}
         
         # Setup custom character mapping if provided
         cdef int i
         cdef int ch_byte
         
-        if charset is not None and enable_indexing:
+        if charset is not None:
             _custom_fallback_bit = -1
             # Initialize map to -1 (unmapped)
             for i in range(256):
@@ -315,9 +368,140 @@ cdef class MARCReader:
             _custom_fallback_bit = -1
             _custom_char_map[0] = -1
         
-        self._build_index()
-        if self._indexing_enabled:
+    # No automatic indexing: user must call .index() to build & run hooks.
+
+    def add_index(self, field_spec, fuzzy=None):
+        """
+        Register a field for indexing (fuzzy bitmask or exact hash map).
+        
+        Args:
+            field_spec: Field specification (e.g., "001", "245$a", "020$a")
+            fuzzy: True for bitmask (substring search), False for exact (hash map lookup)
+                   If None, auto-detect: False for control fields (001-009), True otherwise
+        
+        Returns:
+            self (for method chaining)
+        
+        Examples:
+            # Auto-detect: control fields are exact, data fields are fuzzy
+            reader = (MARCReader(fp)
+                .add_index("001")           # Exact (auto-detected)
+                .add_index("245$a")         # Fuzzy (auto-detected)
+                .index())
+            
+            # Explicit fuzzy/exact:
+            reader = (MARCReader(fp)
+                .add_index("020$a", fuzzy=False)  # ISBN: exact lookup
+                .add_index("650$a", fuzzy=True)   # Subjects: substring search
+                .index())
+        """
+        if self._index_built:
+            raise RuntimeError("Cannot add indexes after .index() has been called")
+        
+        # Parse field spec to determine tag
+        if "$" in field_spec:
+            tag, subfield = field_spec.split("$", 1)
+            tag_bytes = tag.encode("ascii")
+            subfield_byte = ord(subfield[0]) if subfield else 0
+        else:
+            tag = field_spec
+            tag_bytes = tag.encode("ascii")
+            subfield_byte = 0
+        
+        # Auto-detect fuzzy vs exact based on tag
+        if fuzzy is None:
+            fuzzy = not _is_control_tag(<const unsigned char*>tag_bytes)
+        
+        if fuzzy:
+            # Add to fuzzy/bitmask indexes
+            if field_spec not in self._index_fields:
+                self._index_fields.append(field_spec)
+        else:
+            # Add to exact/hash map indexes
+            if field_spec not in self._exact_indexes:
+                self._exact_indexes[field_spec] = {}
+            # Store parsed spec for later use during indexing
+            spec_tuple = (tag_bytes, subfield_byte, field_spec)
+            if spec_tuple not in self._exact_fields:
+                self._exact_fields.append(spec_tuple)
+        
+        return self
+
+    def build_index(self, field_specs=None):
+        """
+        Build the record index and run field hooks (explicit only).
+        Must be invoked before using search(), len(), get_record(), or relying
+        on hooks. Streaming iteration without calling .index() is supported
+        but will NOT execute hooks.
+        
+        Args:
+            field_specs: Optional field specifications to add to fuzzy index
+                        (for backward compatibility with .index("245$a", ...) pattern)
+        
+        Returns:
+            self (for method chaining)
+        """
+        if not self._index_built:
+            # Handle old-style .index("field1", "field2") calls
+            if field_specs is not None:
+                for fs in field_specs:
+                    self.add_index(fs)  # Use add_index with auto-detect
+            
+            # If no indexes added at all, use defaults
+            if not self._index_fields and not self._exact_fields:
+                self.add_index("001")      # Default: exact (control field)
+                self.add_index("245$a")    # Default: fuzzy (data field)
+            
+            # Enable indexing if we have fuzzy fields
+            if self._index_fields and not self._indexing_enabled:
+                self._indexing_enabled = True
+                # Compute mask sizing
+                if self._charset is not None:
+                    charset_len = len(set(self._charset))
+                    self._bits_per_mask = charset_len + 1
+                else:
+                    self._bits_per_mask = 256
+                if self._bits_per_mask <= 8:
+                    self._mask_bytes_per_record = 1
+                elif self._bits_per_mask <= 16:
+                    self._mask_bytes_per_record = 2
+                elif self._bits_per_mask <= 32:
+                    self._mask_bytes_per_record = 4
+                elif self._bits_per_mask <= 64:
+                    self._mask_bytes_per_record = 8
+                else:
+                    self._mask_bytes_per_record = ((self._bits_per_mask + 63)//64)*8
+            
+            self._build_index()
             self._build_masks()
+            self._index_built = True
+        return self
+    
+    def index(self, *field_specs):
+        """
+        Build the index and run all field hooks.
+        Explicit call required – no automatic build on iteration.
+        
+        Example:
+            subjects = FieldCounter()
+            reader = (MARCReader(fp)
+                .hook("650$a", subjects)
+                .index())
+            print(subjects.counts.most_common(10))
+        
+        Returns:
+            self (for method chaining)
+        """
+        return self.build_index(field_specs if field_specs else None)
+    
+    def build(self):
+        """
+        Alias for index(). Deprecated - use .index() instead.
+        
+        Returns:
+            self (for method chaining)
+        """
+        return self.build_index()
 
     def close(self):
         """Release resources (mmap + C buffers). Safe to call multiple times."""
@@ -446,6 +630,7 @@ cdef class MARCReader:
         self.fp.seek(0, io.SEEK_SET)
 
     def __iter__(self):
+        # Streaming iteration without indexing/hook execution (unless .index() has been called).
         self._i = 0
         return self
 
@@ -474,7 +659,10 @@ cdef class MARCReader:
 
     
     def get_record(self, Py_ssize_t idx):
-        """Return the pymarc.Record at the given index."""
+        """Return the pymarc.Record at the given index (requires prior .index())."""
+        if not self._index_built:
+            raise RuntimeError("Index not built. Call .index() first.")
+            
         if idx < 0 or idx >= self._n:
             raise IndexError("Record index out of range")
 
@@ -505,13 +693,71 @@ cdef class MARCReader:
             out[j] = self._offsets[j]
         return out
 
+    cpdef dict get_exact_index(self, str field_spec):
+        """Return the exact index map for a field (value -> list of record indices).
+
+        Args:
+            field_spec: Field specification (e.g., "001", "245$a")
+
+        Returns:
+            dict mapping field values (str) to list of record indices. Empty dict if
+            field was not indexed exactly or index() not yet called.
+        """
+        if not self._index_built:
+            return {}
+        if field_spec in self._exact_indexes:
+            return self._exact_indexes[field_spec]
+        return {}
+
 
     def __len__(self):
+        if not self._index_built:
+            raise RuntimeError("Index not built. Call .index() first.")
         return self._n
 
     # ========================================================================
     # Indexing Support
     # ========================================================================
+
+    def hook(self, field_specs, hook_func):
+        """Register a hook (single or multi-field) that always receives lists of values.
+
+        Semantics:
+          * Single field spec: The hook is invoked once per record with a list of all
+            occurrences (possibly empty) of that field/subfield.
+          * Multiple field specs: The hook is invoked once per record with a dict:
+                { field_spec: [list of all occurrences], ... }
+            Only specs with at least one occurrence may be included (to reduce noise).
+
+        Args:
+            field_specs: str (e.g., "245$a") or iterable of str (e.g., ["008", "264$c"]).
+            hook_func:  Callable. For single spec it receives list[str]; for multiple
+                        specs it receives dict[str, list[str]].
+
+        Returns:
+            self
+        """
+        # Normalize input
+        if isinstance(field_specs, str):
+            specs_list = [field_specs]
+        else:
+            specs_list = list(field_specs)
+        if not specs_list:
+            raise ValueError("field_specs must contain at least one field spec")
+        if len(specs_list) == 1:
+            spec = specs_list[0]
+            if spec not in self._field_hooks:
+                self._field_hooks[spec] = []
+            self._field_hooks[spec].append(hook_func)
+        else:
+            self._multi_field_hooks.append((specs_list, hook_func))
+        return self
+
+    def hook_multi(self, field_specs, hook_func):  # alias for older API name
+        return self.hook(field_specs, hook_func)
+
+    def hook_multi(self, field_specs, hook_func):  # compatibility alias
+        return self.hook(field_specs, hook_func)
     
     cdef void _reserve_masks(self) except *:
         """Reserve space for masks array."""
@@ -528,11 +774,12 @@ cdef class MARCReader:
             raise MemoryError("Unable to allocate masks array")
     
     cdef void _build_masks(self) except *:
-        """Build bitmasks for all indexed records."""
-        if not self._indexing_enabled:
-            return
+        """Run field hooks and (if enabled) build bitmasks and exact indexes for all records."""
+        cdef bint do_masks = self._indexing_enabled
+        cdef bint do_exact = len(self._exact_fields) > 0
         
-        self._reserve_masks()
+        if do_masks:
+            self._reserve_masks()
         
         cdef Py_ssize_t i
         cdef size_t off
@@ -542,43 +789,123 @@ cdef class MARCReader:
         cdef bytes tag_bytes, raw
         cdef char subc
         cdef void* mask_ptr
+        cdef str field_spec
+        cdef list analyzer_list
+        cdef str value_str
         
-        # Parse field specs once
+        # Parse field specs once (only needed if building masks)
         cdef list parsed_specs = []
-        for spec in self._index_fields:
+        if do_masks:
+            for spec in self._index_fields:
+                if "$" in spec:
+                    tag, sub = spec.split("$", 1)
+                    parsed_specs.append((tag.encode("ascii"), ord(sub[0]) if sub else 0, spec))
+                else:
+                    parsed_specs.append((spec.encode("ascii"), 0, spec))
+        
+        # Also parse hook specs (might not be in index_fields)
+        cdef list hook_specs = []
+        for spec in self._field_hooks.keys():
             if "$" in spec:
                 tag, sub = spec.split("$", 1)
-                parsed_specs.append((tag.encode("ascii"), ord(sub[0]) if sub else 0))
+                hook_specs.append((tag.encode("ascii"), ord(sub[0]) if sub else 0, spec))
             else:
-                parsed_specs.append((spec.encode("ascii"), 0))
+                hook_specs.append((spec.encode("ascii"), 0, spec))
         
-        # Zero out all masks
-        memset(self._masks, 0, <size_t>self._n * <size_t>self._mask_bytes_per_record)
+        # Zero out all masks if using indexing
+        if do_masks:
+            memset(self._masks, 0, <size_t>self._n * <size_t>self._mask_bytes_per_record)
         
-        # Build masks for each record
+        # Pre-parse specs used by multi-field hooks (may overlap with others)
+        multi_parsed = {}
+        if self._multi_field_hooks:
+            for spec_list, hook in self._multi_field_hooks:
+                for spec in spec_list:
+                    if spec not in multi_parsed:
+                        if "$" in spec:
+                            tag, sub = spec.split("$", 1)
+                            multi_parsed[spec] = (tag.encode("ascii"), ord(sub[0]) if sub else 0)
+                        else:
+                            multi_parsed[spec] = (spec.encode("ascii"), 0)
+
+        # Build indexes for each record
         for i in range(self._n):
             off = self._offsets[i]
             rec_ptr = &buf[off]
             reclen = self._lengths[i]
             
-            # Get pointer to this record's mask
-            mask_ptr = <void*>(<char*>self._masks + i * self._mask_bytes_per_record)
+            # Get pointer to this record's mask (if fuzzy indexing enabled)
+            if do_masks:
+                mask_ptr = <void*>(<char*>self._masks + i * self._mask_bytes_per_record)
             
-            # Update mask from each indexed field
-            for tag_bytes, subc in parsed_specs:
-                raw = get_subfield(rec_ptr, reclen, tag_bytes, subc)
-                if raw:
-                    self._update_mask_fast(mask_ptr, <const uint8_t*>raw, len(raw))
+            # Update fuzzy mask from each indexed field (if enabled)
+            if do_masks:
+                for tag_bytes, subc, field_spec in parsed_specs:
+                    occurrences = get_subfields(rec_ptr, reclen, tag_bytes, subc)
+                    if occurrences:
+                        # Union all characters from all occurrences into mask
+                        for raw_val in occurrences:
+                            self._update_mask_fast(mask_ptr, <const uint8_t*>raw_val, len(raw_val))
+                    # Single-field hooks: pass list of decoded values (may be empty)
+                    if field_spec in self._field_hooks:
+                        hook_list = self._field_hooks[field_spec]
+                        values_list = [b.decode('utf-8', errors='replace') for b in occurrences]
+                        for hook in hook_list:
+                            hook(values_list)
+            
+            # Build exact indexes (hash map: value -> [record_idx, ...])
+            if do_exact:
+                for tag_bytes, subc, field_spec in self._exact_fields:
+                    occurrences = get_subfields(rec_ptr, reclen, tag_bytes, subc)
+                    if occurrences:
+                        seen_local = set()
+                        for raw_val in occurrences:
+                            value_str = raw_val.decode('utf-8', errors='replace')
+                            if value_str in seen_local:
+                                continue
+                            seen_local.add(value_str)
+                            if value_str not in self._exact_indexes[field_spec]:
+                                self._exact_indexes[field_spec][value_str] = []
+                            self._exact_indexes[field_spec][value_str].append(i)
+            
+            # Process hook-only fields (not in index_fields or exact_fields)
+            for tag_bytes, subc, field_spec in hook_specs:
+                if field_spec not in self._index_fields:
+                    # Check if it's also not in exact fields
+                    is_exact = False
+                    for etag, esubc, espec in self._exact_fields:
+                        if espec == field_spec:
+                            is_exact = True
+                            break
+                    if not is_exact:
+                        occurrences = get_subfields(rec_ptr, reclen, tag_bytes, subc)
+                        values_list = [b.decode('utf-8', errors='replace') for b in occurrences]
+                        hook_list = self._field_hooks[field_spec]
+                        for hook in hook_list:
+                            hook(values_list)
+
+            # Multi-field hooks (invoke once per record)
+            if self._multi_field_hooks:
+                # Collect lists of all occurrences for each requested spec
+                values_cache_lists = {}
+                for spec, parsed in multi_parsed.items():
+                    tag_bytes = parsed[0]
+                    subc = parsed[1]
+                    occs = get_subfields(rec_ptr, reclen, tag_bytes, subc)
+                    if occs:
+                        values_cache_lists[spec] = [b.decode('utf-8', errors='replace') for b in occs]
+                # Invoke each multi hook with subset relevant to it
+                for spec_list, hook in self._multi_field_hooks:
+                    submap = {spec: values_cache_lists[spec] for spec in spec_list if spec in values_cache_lists}
+                    hook(submap)
         
         # Report efficiency if using custom charset
-        if self._charset:
+        if self._charset and do_masks:
             total_mb = (self._n * self._mask_bytes_per_record) / (1024.0 * 1024.0)
             bits_needed = self._bits_per_mask
-            
             # Calculate efficiency
             bytes_optimal = (bits_needed + 7) // 8
             efficiency = (bytes_optimal / self._mask_bytes_per_record) * 100.0 if self._mask_bytes_per_record > 0 else 100.0
-            
             type_name = ""
             if self._mask_bytes_per_record == 1:
                 type_name = "uint8_t"
@@ -590,7 +917,6 @@ cdef class MARCReader:
                 type_name = "uint64_t"
             else:
                 type_name = f"{self._mask_bytes_per_record}-byte"
-            
             print(f"Custom charset '{self._charset}': {bits_needed} bits → {type_name} "
                   f"({self._mask_bytes_per_record} bytes/record, {efficiency:.1f}% efficient, {total_mb:.2f} MB total)")
     
@@ -675,28 +1001,51 @@ cdef class MARCReader:
                 bit = _map_char(text[i])
                 _mask_set_multi(m64, bit)
     
-    cpdef list search(self, str tag, str subfield, str text):
+    cpdef list search(self, str field_spec, str text):
         """
-        Search for records containing text in field/subfield.
-        Requires enable_indexing=True when creating the reader.
+        Search for records containing text in the specified field specification.
+        
+        Automatically uses exact (hash map) or fuzzy (bitmask) search based on
+        how the field was indexed via add_index()/index().
         
         Args:
-            tag: 3-character MARC tag (e.g., "245")
-            subfield: Subfield code (e.g., "a") or empty string for entire field
-            text: Substring to search for
-            
+            field_spec: Field specification string (e.g., "245$a", "001", "020$a")
+            text: Text to search for (exact match when exact-indexed, substring when fuzzy)
         Returns:
-            List of record indices (use get_record(idx) to retrieve)
+            List of record indices (may be empty, single item, or multiple for collisions)
+        Examples:
+            # Exact lookup (001 indexed exact)
+            results = reader.search("001", "12345")
+            # Fuzzy search (245$a indexed fuzzy)
+            results = reader.search("245$a", "history")
         """
+        if not self._index_built:
+            raise RuntimeError("Index not built. Call .index() first.")
+        
+        # Check if exact index exists for this field
+        if field_spec in self._exact_indexes:
+            return self._exact_indexes[field_spec].get(text, [])
+        
+        # Otherwise perform fuzzy bitmask search
         if not self._indexing_enabled:
-            raise RuntimeError("Indexing not enabled. Create reader with enable_indexing=True")
+            raise RuntimeError("No fuzzy index built for this field. Use add_index() with fuzzy=True.")
+        
+        # Parse field spec
+        cdef bytes tag_bytes
+        cdef char subfield_byte
+        cdef list parts
+        if "$" in field_spec:
+            parts = field_spec.split("$", 1)
+            tag_bytes = (<str>parts[0]).encode("ascii")
+            subfield_byte = ord((<str>parts[1])[0]) if parts[1] else 0
+        else:
+            tag_bytes = field_spec.encode("ascii")
+            subfield_byte = 0
         
         global _mask_type
         cdef Py_ssize_t i
         cdef bint pass_mask
         cdef list out = []
-        cdef bytes tag_bytes = tag.encode("ascii")
-        cdef char subfield_byte = ord(subfield[0]) if subfield else 0
         cdef bytes text_bytes = text.encode("utf-8")
         cdef const uint8_t[:] buf = self._mm
         cdef const uint8_t* rec_ptr
@@ -723,6 +1072,7 @@ cdef class MARCReader:
         else:
             query_mask_ptr = query_mask_multi
         
+        # Build the query mask for the search text
         self._build_query_mask(query_mask_ptr, <const uint8_t*>text_bytes, len(text_bytes))
         
         # Search through records
