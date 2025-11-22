@@ -142,7 +142,7 @@ with open("records.mrc", "rb") as f:
 
 #+begin_src python
 with open("records.mrc", "rb") as f:
-    # Search for OCLC numbers in 035$a (System Control Number)
+    # Search for OCLC numbers in 035$a
     reader = MARCReader(f).add_index("035$a").index()
 
     # Search returns indices of records with OCLC numbers
