@@ -1,8 +1,8 @@
 from fastmarc import MARCReader
 
-# Explicit indexing: call .index() with the fields you want searchable
+# Explicit indexing: use .add_index() to register fields, then .index() to build
 with open("CUY.UCB_serials_test_combined.mrc", "rb") as f:
-    reader = MARCReader(f).index("245$a")
+    reader = MARCReader(f).add_index("245$a").index()
 
     print(f"Loaded {len(reader)} records")
 

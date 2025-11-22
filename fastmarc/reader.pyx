@@ -128,16 +128,6 @@ cdef inline const unsigned char* _find_subfield_ptr(
         i += 12
     return NULL
 
-cdef bytes get_subfield(const unsigned char* rec_ptr, Py_ssize_t reclen,
-                        bytes tag, char subfield):
-    """Extract a specific subfield from a MARC record."""
-    cdef const unsigned char* tag3 = <const unsigned char*> tag
-    cdef int length = 0
-    cdef const unsigned char* ptr = _find_subfield_ptr(rec_ptr, reclen, tag3, subfield, &length)
-    
-    if ptr == NULL:
-        return b""
-    return <bytes> ptr[:length]
 
 cdef bint record_contains(const unsigned char* rec_ptr, Py_ssize_t reclen,
                           bytes tag, char subfield, bytes needle):
@@ -427,16 +417,14 @@ cdef class MARCReader:
         # Set fallback bit
         _custom_fallback_bit = len(unique_chars)
 
-    def build_index(self, field_specs=None, charset=None):
+    def build_index(self, charset=None):
         """
-        Build the record index and run field hooks (explicit only).
+        Build the record index and run field hooks.
         Must be invoked before using search(), len(), get_record(), or relying
         on hooks. Streaming iteration without calling .index() is supported
         but will NOT execute hooks.
 
         Args:
-            field_specs: Optional field specifications to add to fuzzy index
-                        (for backward compatibility with .index("245$a", ...) pattern)
             charset: Optional custom character set for fuzzy indexing. If provided,
                     only these characters will be indexed for fuzzy search.
 
@@ -457,15 +445,12 @@ cdef class MARCReader:
                 _custom_fallback_bit = -1
                 _custom_char_map[0] = -1
 
-            # Handle old-style .index("field1", "field2") calls
-            if field_specs is not None:
-                for fs in field_specs:
-                    self.add_index(fs)  # Use add_index with auto-detect
-
-            # If no indexes added at all, use defaults
-            if not self._index_fields and not self._exact_fields:
-                self.add_index("001")      # Default: exact (control field)
-                self.add_index("245$a")    # Default: fuzzy (data field)
+            # Require at least one index to be added
+            if not self._index_fields and not self._exact_fields and not self._field_hooks and not self._multi_field_hooks:
+                raise ValueError(
+                    "No indexes or hooks registered. Use .add_index() to register fields for indexing, "
+                    "or .hook() to register field hooks before calling .index()"
+                )
 
             # Enable indexing if we have fuzzy fields
             if self._index_fields and not self._indexing_enabled:
@@ -492,23 +477,23 @@ cdef class MARCReader:
             self._index_built = True
         return self
     
-    def index(self, *field_specs, charset=None):
+    def index(self, charset=None):
         """
         Build the index and run all field hooks.
         Explicit call required – no automatic build on iteration.
 
         Args:
-            *field_specs: Optional field specifications to add to fuzzy index
             charset: Optional custom character set for fuzzy indexing
 
         Example:
+            # Basic usage with hooks
             subjects = FieldCounter()
             reader = (MARCReader(fp)
                 .hook("650$a", subjects)
                 .index())
             print(subjects.counts.most_common(10))
 
-            # With custom charset
+            # With indexing and custom charset
             reader = (MARCReader(fp)
                 .add_index("245$a")
                 .index(charset="abcdefghijklmnopqrstuvwxyz0123456789"))
@@ -516,16 +501,7 @@ cdef class MARCReader:
         Returns:
             self (for method chaining)
         """
-        return self.build_index(field_specs if field_specs else None, charset=charset)
-    
-    def build(self):
-        """
-        Alias for index(). Deprecated - use .index() instead.
-        
-        Returns:
-            self (for method chaining)
-        """
-        return self.build_index()
+        return self.build_index(charset=charset)
 
     def close(self):
         """Release resources (mmap + C buffers). Safe to call multiple times."""
@@ -777,12 +753,6 @@ cdef class MARCReader:
             self._multi_field_hooks.append((specs_list, hook_func))
         return self
 
-    def hook_multi(self, field_specs, hook_func):  # alias for older API name
-        return self.hook(field_specs, hook_func)
-
-    def hook_multi(self, field_specs, hook_func):  # compatibility alias
-        return self.hook(field_specs, hook_func)
-    
     cdef void _reserve_masks(self) except *:
         """Reserve space for masks array."""
         if self._masks != NULL:
