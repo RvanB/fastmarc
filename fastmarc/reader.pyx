@@ -867,6 +867,12 @@ cdef class MARCReader:
                             if value_str not in self._exact_indexes[field_spec]:
                                 self._exact_indexes[field_spec][value_str] = []
                             self._exact_indexes[field_spec][value_str].append(i)
+                    # Execute hooks for exact-indexed fields
+                    if field_spec in self._field_hooks:
+                        hook_list = self._field_hooks[field_spec]
+                        values_list = [b.decode('utf-8', errors='replace') for b in occurrences]
+                        for hook in hook_list:
+                            hook(values_list)
             
             # Process hook-only fields (not in index_fields or exact_fields)
             for tag_bytes, subc, field_spec in hook_specs:
