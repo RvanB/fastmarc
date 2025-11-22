@@ -1,13 +1,11 @@
 #+TITLE: FastMARC
 #+OPTIONS: toc:nil num:nil
 
-High-performance MARC record reader with dual indexing and field hooks.
-
-Built with Cython and memory-mapped I/O. Fully compatible with ~pymarc.Record~.
+High-performance MARC record reader designed for fast retrieval, search, and analysis.
 
 * Features
 
-- Indexing*: Index for both exact and fuzzy matching, useful for looking up identifiers or searching for text
+- *Indexing*: Index for both exact and fuzzy matching, useful for looking up identifiers or searching for text
 - *Field hooks*: Hook your own Python functions into the indexing of MARC fields. Great for analyzing your collection.
 - *Custom charsets*: Optimize memory by adjusting the character set used for indexing.
 - *Optimized for MARC binary*: Taking full advantage of the binary MARC format, fastmarc rips through hundreds of thousands of records in the blink of an eye.
