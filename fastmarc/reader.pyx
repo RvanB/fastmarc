@@ -445,13 +445,6 @@ cdef class MARCReader:
                 _custom_fallback_bit = -1
                 _custom_char_map[0] = -1
 
-            # Require at least one index to be added
-            if not self._index_fields and not self._exact_fields and not self._field_hooks and not self._multi_field_hooks:
-                raise ValueError(
-                    "No indexes or hooks registered. Use .add_index() to register fields for indexing, "
-                    "or .hook() to register field hooks before calling .index()"
-                )
-
             # Enable indexing if we have fuzzy fields
             if self._index_fields and not self._indexing_enabled:
                 self._indexing_enabled = True

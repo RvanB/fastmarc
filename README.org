@@ -22,9 +22,13 @@ with open("records.mrc", "rb") as f:
         .hook("650$a", counter)  # Optional: aggregate
         .index())                # Build index
 
-    results = reader.search("245$a", "music")
-    for idx in results[:5]:
-        print(reader.get_record(idx)['245']['a'])
+    # Search returns list of record indices
+    indices = reader.search("245$a", "music")
+
+    # Use get_record() to retrieve records by index
+    for idx in indices[:5]:
+        record = reader.get_record(idx)
+        print(record['245']['a'])
 #+end_src
 
 * Core Workflow
@@ -42,11 +46,14 @@ with open("records.mrc", "rb") as f:
 with open("records.mrc", "rb") as f:
     reader = MARCReader(f).add_index("245$a").index()
 
-    results = reader.search("245$a", "music")
-    print(f"Found {len(results)} records")
+    # Search returns list of matching record indices
+    indices = reader.search("245$a", "music")
+    print(f"Found {len(indices)} matching records")
 
-    for idx in results[:5]:
-        print(reader.get_record(idx)['245']['a'])
+    # Retrieve each record by index
+    for idx in indices[:5]:
+        record = reader.get_record(idx)
+        print(f"Record {idx}: {record['245']['a']}")
 #+end_src
 
 ** Subject Analysis with Hooks
@@ -80,12 +87,17 @@ with open("records.mrc", "rb") as f:
 with open("records.mrc", "rb") as f:
     reader = MARCReader(f).add_index("001", fuzzy=False).index()
 
+    # Exact index maps values to lists of record indices
     id_index = reader.get_exact_index("001")
     duplicates = {id_: idxs for id_, idxs in id_index.items() if len(idxs) > 1}
 
     print(f"Found {len(duplicates)} duplicate IDs\n")
-    for id_, indices in list(duplicates.items())[:5]:
-        print(f"ID {id_}: {len(indices)} records at {indices}")
+    for id_, indices in list(duplicates.items())[:3]:
+        print(f"ID '{id_}' appears in {len(indices)} records:")
+        # Retrieve each duplicate record by index
+        for idx in indices[:3]:
+            record = reader.get_record(idx)
+            print(f"  Record {idx}: {record['245']['a']}")
 #+end_src
 
 ** Multi-Field Year Extraction
@@ -126,31 +138,46 @@ with open("records.mrc", "rb") as f:
         print(f"{year}: {count:6d}")
 #+end_src
 
-** Memory-Optimized ISBN Search
+** Finding OCLC Numbers
 
 #+begin_src python
 with open("records.mrc", "rb") as f:
-    # Custom charset: only index digits and ISBN chars to optimize memory usage
-    reader = (MARCReader(f)
-        .add_index("020$a")
-        .index(charset="0123456789X-"))
+    # Search for OCLC numbers in 035$a (System Control Number)
+    reader = MARCReader(f).add_index("035$a").index()
 
-    results = reader.search("020$a", "978-0-")
-    print(f"Found {len(results)} records with ISBN prefix '978-0-'")
+    # Search returns indices of records with OCLC numbers
+    indices = reader.search("035$a", "oclc")
+    print(f"Found {len(indices)} records with OCLC numbers")
+
+    # Show first few OCLC records
+    for idx in indices[:5]:
+        record = reader.get_record(idx)
+        print(f"Record {idx}: {record['035']['a']}")
 #+end_src
 
 ** Reuse reader for multiple searches
 
 #+begin_src python
-reader = (MARCReader(fp)
-    .add_index("245$a")
-    .add_index("100$a")
-    .add_index("650$a")
-    .index())
+with open("records.mrc", "rb") as f:
+    reader = (MARCReader(f)
+        .add_index("245$a")
+        .add_index("100$a")
+        .add_index("650$a")
+        .index())
 
-titles = reader.search("245$a", "history")
-authors = reader.search("100$a", "smith")
-subjects = reader.search("650$a", "music")
+    # Each search returns list of record indices
+    title_indices = reader.search("245$a", "history")
+    author_indices = reader.search("100$a", "smith")
+    subject_indices = reader.search("650$a", "music")
+
+    print(f"Found {len(title_indices)} titles with 'history'")
+    print(f"Found {len(author_indices)} authors named 'smith'")
+    print(f"Found {len(subject_indices)} subjects about 'music'")
+
+    # Retrieve records from any search result
+    for idx in title_indices[:5]:
+        record = reader.get_record(idx)
+        print(f"  {record['245']['a']}")
 #+end_src
 
 * Documentation
