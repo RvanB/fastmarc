@@ -146,7 +146,7 @@ with open("records.mrc", "rb") as f:
     reader = MARCReader(f).add_index("035$a").index()
 
     # Search returns indices of records with OCLC numbers
-    indices = reader.search("035$a", "oclc")
+    indices = reader.search("035$a", "oc")
     print(f"Found {len(indices)} records with OCLC numbers")
 
     # Show first few OCLC records
