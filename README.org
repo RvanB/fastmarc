@@ -1,69 +1,159 @@
-#+OPTIONS: toc:nil
+#+TITLE: FastMARC
+#+OPTIONS: toc:nil num:nil
 
-* fastmarc
+High-performance MARC record reader designed for fast retrieval, search, and analysis.
 
-A high-performance MARC file reader built on top of [[https://gitlab.com/pymarc/pymarc][pymarc]], written with Cython and memory-mapped I/O.  
+* Features
 
-~fastmarc~ gives you the ability to *index, count, and retrieve MARC records* in ways that are not possible with vanilla ~pymarc~, while still remaining fully compatible with ~pymarc.Record~.
+- *Indexing*: Index for both exact and fuzzy matching, useful for looking up identifiers or searching for text
+- *Field hooks*: Hook your own Python functions into the indexing of MARC fields. Great for analyzing your collection.
+- *Custom charsets*: Optimize memory by adjusting the character set used for indexing.
+- *Optimized for MARC binary*: Taking full advantage of the binary MARC format, fastmarc rips through hundreds of thousands of records in the blink of an eye.
+- *Compatibility with PyMARC*: Returns ~pymarc.Record~ objects for familiar record access
 
-** Features
-
-*** Instant record counts (~__len__~)
-The entire file is scanned once using a lightweight Cython indexer.
-You can get the number of records with ~len(reader)~ *without parsing a single record*.
-
-*** Same iteration speed as ~pymarc.MARCReader~
-Iterating through ~fastmarc.FastMARCReader~ yields ~pymarc.Record~ objects at the same throughput as ~pymarc.MARCReader~, because parsing is still handled by pymarc internally.
-
-*** Random access by record index to file position
-- ~get_seek_map()~ gives you the exact byte offset of every record in the file.
-- ~get_record(i)~ returns the pymarc.Record for the record at index ~i~ without parsing any other records
-
-*** Drop-in compatibility
-Iteration still yields ~pymarc.Record~ objects, so you can keep using existing ~pymarc~ workflows without modification.
-
-** Why use fastmarc?
-
-If you work with large MARC files (hundreds of MBs to many GBs), ~pymarc~ can be limiting:
-
-- Counting records requires iterating through and parsing them all.  
-- Random access is not possible — you must walk the file sequentially.  
-- Large files can take minutes just to "skip ahead."
-
-With ~fastmarc~ you can:
-
-- Check the number of records almost instantly.  
-- Jump to any record’s byte position in constant time.  
-- Iterate with the same speed as ~pymarc~ but without losing indexing metadata.  
-
-** Installation
-
-~fastmarc~ is still in development and not yet published to PyPI.  
-For now, you’ll need to install it from this repository:
-
-#+begin_src bash
-  pip install git+https://github.com/RvanB/fastmarc.git
-#+end_src
-
-** Usage
+* Quick Start
 
 #+begin_src python
-  from fastmarc import MARCReader
+from fastmarc import MARCReader
 
-  with open("records.mrc", "rb") as f:
-      reader = MARCReader(f)
+with open("records.mrc", "rb") as f:
+    reader = (MARCReader(f)
+        .add_index("245$a")      # Register field
+        .hook("650$a", counter)  # Optional: aggregate
+        .index())                # Build index
 
-      # Record count instantly (no parsing)
-      print(len(reader))
-
-      # Iterate through records (same as pymarc)
-      for rec in reader:
-          print(rec["245"]["a"])
-
-      # Get the byte offset of record 100
-      offsets = reader.get_seek_map()
-      print("Record 100 starts at byte:", offsets[99])
-
-      # Get the 100th record
-      print(reader.get_record(99))
+    results = reader.search("245$a", "music")
+    for idx in results[:5]:
+        print(reader.get_record(idx)['245']['a'])
 #+end_src
+
+* Core Workflow
+
+1. *Open* file with ~MARCReader(fp)~
+2. *Register* indexes with ~.add_index()~ and/or hooks with ~.hook()~
+3. *Build* with ~.index(charset=...)~
+4. *Search* with ~.search()~ or iterate with ~for record in reader~
+
+* Examples
+
+** Basic Search
+
+#+begin_src python
+with open("records.mrc", "rb") as f:
+    reader = MARCReader(f).add_index("245$a").index()
+
+    results = reader.search("245$a", "music")
+    print(f"Found {len(results)} records")
+
+    for idx in results[:5]:
+        print(reader.get_record(idx)['245']['a'])
+#+end_src
+
+** Subject Analysis with Hooks
+
+#+begin_src python
+from collections import Counter
+
+class SubjectCounter:
+    def __init__(self):
+        self.counts = Counter()
+
+    def __call__(self, values):
+        for v in values:
+            self.counts[v.strip()] += 1
+
+subjects = SubjectCounter()
+
+with open("records.mrc", "rb") as f:
+    reader = MARCReader(f).hook("650$a", subjects).index()
+
+    print(f"Analyzed {len(reader):,} records")
+    print(f"Unique subjects: {len(subjects.counts)}\n")
+
+    for subject, count in subjects.counts.most_common(10):
+        print(f"{count:6d}  {subject}")
+#+end_src
+
+** Duplicate Detection
+
+#+begin_src python
+with open("records.mrc", "rb") as f:
+    reader = MARCReader(f).add_index("001", fuzzy=False).index()
+
+    id_index = reader.get_exact_index("001")
+    duplicates = {id_: idxs for id_, idxs in id_index.items() if len(idxs) > 1}
+
+    print(f"Found {len(duplicates)} duplicate IDs\n")
+    for id_, indices in list(duplicates.items())[:5]:
+        print(f"ID {id_}: {len(indices)} records at {indices}")
+#+end_src
+
+** Multi-Field Year Extraction
+
+#+begin_src python
+from collections import Counter
+
+class YearExtractor:
+    def __init__(self):
+        self.years = Counter()
+        self.source = Counter()
+
+    def __call__(self, fields):
+        year = None
+        if "008" in fields and fields["008"]:
+            year = fields["008"][0][7:11]
+            if year.isdigit():
+                self.source['008'] += 1
+        elif "264$c" in fields:
+            import re
+            match = re.search(r'(19|20)\d{2}', fields["264$c"][0])
+            if match:
+                year = match.group(0)
+                self.source['264$c'] += 1
+
+        if year and year.isdigit():
+            self.years[year] += 1
+
+years = YearExtractor()
+
+with open("records.mrc", "rb") as f:
+    reader = MARCReader(f).hook(["008", "264$c"], years).index()
+
+    print(f"Total years: {sum(years.years.values()):,}")
+    print(f"Sources: {years.source}")
+    print("\nTop 10 years:")
+    for year, count in years.years.most_common(10):
+        print(f"{year}: {count:6d}")
+#+end_src
+
+** Memory-Optimized ISBN Search
+
+#+begin_src python
+with open("records.mrc", "rb") as f:
+    # Custom charset: only index digits and ISBN chars to optimize memory usage
+    reader = (MARCReader(f)
+        .add_index("020$a")
+        .index(charset="0123456789X-"))
+
+    results = reader.search("020$a", "978-0-")
+    print(f"Found {len(results)} records with ISBN prefix '978-0-'")
+#+end_src
+
+** Reuse reader for multiple searches
+
+#+begin_src python
+reader = (MARCReader(fp)
+    .add_index("245$a")
+    .add_index("100$a")
+    .add_index("650$a")
+    .index())
+
+titles = reader.search("245$a", "history")
+authors = reader.search("100$a", "smith")
+subjects = reader.search("650$a", "music")
+#+end_src
+
+* Documentation
+- [[file:API.org][API.org]] - Complete API reference
+
+

@@ -1,0 +1,259 @@
+#+TITLE: FastMARC API Reference
+#+AUTHOR: FastMARC
+#+OPTIONS: toc:2 num:nil
+
+* MARCReader
+
+** ~__init__~
+
+#+begin_src python
+MARCReader(fp)
+#+end_src
+
+*Parameters:*
+- ~fp~ (file): Binary file object (~open(..., "rb")~)
+
+*Returns:* MARCReader instance
+
+*Example:*
+#+begin_src python
+with open("records.mrc", "rb") as f:
+    reader = MARCReader(f)
+#+end_src
+
+------
+
+** ~add_index(field_spec, fuzzy=None)~
+
+Register a field for indexing.
+
+*Parameters:*
+- ~field_spec~ (str): Field specification
+  - Control fields: ~"001"~, ~"008"~
+  - Data field subfields: ~"245$a"~, ~"650$a"~
+- ~fuzzy~ (bool, optional):
+  - ~True~: Fuzzy/bitmask (substring search)
+  - ~False~: Exact/hashmap (O(1) lookup)
+  - ~None~: Auto-detect (control=exact, data=fuzzy)
+
+*Returns:* ~self~ (for chaining)
+
+*Raises:* ~RuntimeError~ if called after ~.index()~
+
+*Example:*
+#+begin_src python
+reader = (MARCReader(fp)
+    .add_index("001")                 # Auto: exact (control field)
+    .add_index("245$a")               # Auto: fuzzy (data field)
+    .add_index("020$a", fuzzy=False)  # Explicit: exact (ISBN)
+    .add_index("650$a", fuzzy=True))  # Explicit: fuzzy (subjects)
+#+end_src
+
+------
+
+** ~index(charset=None)~
+
+Build indexes and execute hooks.
+
+*Parameters:*
+- ~charset~ (str, optional): Custom character set for fuzzy indexing
+  - Default: full 256-bit character space
+  - Examples: ~"0123456789"~ (digits), ~"aeiou"~ (vowels)
+
+*Returns:* ~self~ (for chaining)
+
+*Raises:* ~ValueError~ if no indexes or hooks registered
+
+*Example:*
+#+begin_src python
+# Basic indexing
+reader = MARCReader(fp).add_index("245$a").index()
+
+# With custom charset (memory optimization)
+reader = MARCReader(fp).add_index("020$a").index(charset="0123456789")
+
+# With hooks only (no search index)
+reader = MARCReader(fp).hook("650$a", counter).index()
+#+end_src
+
+------
+
+** ~hook(field_specs, callable)~
+
+Register field hook for aggregation/analysis during indexing.
+
+*Parameters:*
+- ~field_specs~:
+  - ~str~: Single field (e.g., ~"650$a"~)
+  - ~list[str]~: Multiple fields (e.g., ~["008", "264$c"]~)
+- ~callable~: Hook function
+
+*Returns:* ~self~ (for chaining)
+
+*Hook Signatures:*
+
+Single-field hook:
+#+begin_src python
+def hook(values: list[str]) -> None:
+    """Called once per record with list of all occurrences."""
+    pass
+#+end_src
+
+Multi-field hook:
+#+begin_src python
+def hook(fields: dict[str, list[str]]) -> None:
+    """Called once per record with dict of fields present."""
+    pass
+#+end_src
+
+*Example:*
+#+begin_src python
+from collections import Counter
+
+# Single-field hook
+class FieldCounter:
+    def __init__(self):
+        self.counts = Counter()
+
+    def __call__(self, values):
+        for v in values:
+            self.counts[v] += 1
+
+subjects = FieldCounter()
+reader = MARCReader(fp).hook("650$a", subjects).index()
+print(subjects.counts.most_common(10))
+
+# Multi-field hook (fallback logic)
+class YearExtractor:
+    def __init__(self):
+        self.years = Counter()
+
+    def __call__(self, fields):
+        year = None
+        if "008" in fields and fields["008"]:
+            year = fields["008"][0][7:11]
+        elif "264$c" in fields:
+            year = fields["264$c"][0].strip("[]c")
+        if year and year.isdigit():
+            self.years[year] += 1
+
+years = YearExtractor()
+reader = MARCReader(fp).hook(["008", "264$c"], years).index()
+#+end_src
+
+------
+
+** ~search(field_spec, text)~
+
+Search indexed field for matching records.
+
+*Parameters:*
+- ~field_spec~ (str): Field to search (must be indexed)
+- ~text~ (str): Search query
+
+*Returns:* ~list[int]~ - List of matching record indices
+
+*Behavior:*
+- *Fuzzy index*: Case-insensitive substring match
+- *Exact index*: Exact value lookup (returns all collisions)
+
+*Raises:* ~RuntimeError~ if ~.index()~ not called or field not indexed
+
+*Example:*
+#+begin_src python
+reader = (MARCReader(fp)
+    .add_index("001", fuzzy=False)
+    .add_index("245$a", fuzzy=True)
+    .index())
+
+# Exact lookup
+ids = reader.search("001", "12345")  # [0] or [0, 142] if collision
+
+# Fuzzy search
+results = reader.search("245$a", "music")  # [10, 20, 30, ...]
+#+end_src
+
+------
+
+** ~get_record(idx)~
+
+Retrieve record by index.
+
+*Parameters:*
+- ~idx~ (int): Zero-based record index
+
+*Returns:* ~pymarc.Record~
+
+*Raises:*
+- ~RuntimeError~ if ~.index()~ not called
+- ~IndexError~ if out of range
+
+*Example:*
+#+begin_src python
+reader = MARCReader(fp).add_index("245$a").index()
+record = reader.get_record(0)
+print(record['245']['a'])
+#+end_src
+
+------
+
+** ~get_exact_index(field_spec)~
+
+Direct access to exact index dictionary.
+
+*Parameters:*
+- ~field_spec~ (str): Field specification
+
+*Returns:* ~dict[str, list[int]]~ - Value → record indices mapping
+
+*Example:*
+#+begin_src python
+reader = MARCReader(fp).add_index("245$a", fuzzy=False).index()
+title_index = reader.get_exact_index("245$a")
+
+# Find duplicates
+for title, indices in title_index.items():
+    if len(indices) > 1:
+        print(f"'{title}': {len(indices)} records")
+#+end_src
+
+------
+
+** ~__len__()~
+
+Get total record count.
+
+*Returns:* ~int~
+
+*Raises:* ~RuntimeError~ if ~.index()~ not called
+
+*Example:*
+#+begin_src python
+reader = MARCReader(fp).add_index("245$a").index()
+print(f"{len(reader):,} records")
+#+end_src
+
+------
+
+** ~__iter__()~
+
+Iterate through all records.
+
+*Yields:* ~pymarc.Record~
+
+*Note:* Can iterate without calling ~.index()~ (no hooks/search)
+
+*Example:*
+#+begin_src python
+reader = MARCReader(fp)
+for record in reader:
+    print(record['245']['a'])
+#+end_src
+
+------
+
+** ~close()~
+
+Free memory and close resources.
+
+*Note:* Called automatically on garbage collection.
