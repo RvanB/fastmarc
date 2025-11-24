@@ -18,9 +18,9 @@ from fastmarc import MARCReader
 
 with open("records.mrc", "rb") as f:
     reader = (MARCReader(f)
-        .add_index("245$a")      # Register field
-        .hook("650$a", counter)  # Optional: aggregate
-        .index())                # Build index
+        .add_index("title", "245$a")     # Register named index
+        .hook("650$a", counter)          # Optional: aggregate
+        .build_index())                        # Build index
 
     # Search returns list of record indices
     indices = reader.search("245$a", "music")
@@ -35,7 +35,7 @@ with open("records.mrc", "rb") as f:
 
 1. *Open* file with ~MARCReader(fp)~
 2. *Register* indexes with ~.add_index()~ and/or hooks with ~.hook()~
-3. *Build* with ~.index(charset=...)~
+3. *Build* with ~.build_index(charset=...)~
 4. *Search* with ~.search()~ or iterate with ~for record in reader~
 
 * Examples
@@ -44,7 +44,7 @@ with open("records.mrc", "rb") as f:
 
 #+begin_src python
 with open("records.mrc", "rb") as f:
-    reader = MARCReader(f).add_index("245$a").index()
+    reader = MARCReader(f).add_index("title", "245$a").build_index()
 
     # Search returns list of matching record indices
     indices = reader.search("245$a", "music")
@@ -72,7 +72,7 @@ class SubjectCounter:
 subjects = SubjectCounter()
 
 with open("records.mrc", "rb") as f:
-    reader = MARCReader(f).hook("650$a", subjects).index()
+    reader = MARCReader(f).hook("650$a", subjects).build_index()
 
     print(f"Analyzed {len(reader):,} records")
     print(f"Unique subjects: {len(subjects.counts)}\n")
@@ -85,10 +85,10 @@ with open("records.mrc", "rb") as f:
 
 #+begin_src python
 with open("records.mrc", "rb") as f:
-    reader = MARCReader(f).add_index("001", fuzzy=False).index()
+    reader = MARCReader(f).add_index("control_num", "001", mode="map").build_index()
 
-    # Exact index maps values to lists of record indices
-    id_index = reader.get_exact_index("001")
+    # Map index: values to lists of record indices
+    id_index = reader.get_index("control_num")
     duplicates = {id_: idxs for id_, idxs in id_index.items() if len(idxs) > 1}
 
     print(f"Found {len(duplicates)} duplicate IDs\n")
@@ -129,7 +129,7 @@ class YearExtractor:
 years = YearExtractor()
 
 with open("records.mrc", "rb") as f:
-    reader = MARCReader(f).hook(["008", "264$c"], years).index()
+    reader = MARCReader(f).hook(["008", "264$c"], years).build_index()
 
     print(f"Total years: {sum(years.years.values()):,}")
     print(f"Sources: {years.source}")
@@ -142,8 +142,8 @@ with open("records.mrc", "rb") as f:
 
 #+begin_src python
 with open("records.mrc", "rb") as f:
-    # Search for OCLC numbers in 035$a
-    reader = MARCReader(f).add_index("035$a").index()
+    # Search for OCLC numbers in 035$a (System Control Number)
+    reader = MARCReader(f).add_index("sys_control", "035$a").build_index()
 
     # Search returns indices of records with OCLC numbers
     indices = reader.search("035$a", "oc")
@@ -160,10 +160,10 @@ with open("records.mrc", "rb") as f:
 #+begin_src python
 with open("records.mrc", "rb") as f:
     reader = (MARCReader(f)
-        .add_index("245$a")
-        .add_index("100$a")
-        .add_index("650$a")
-        .index())
+        .add_index("title", "245$a")
+        .add_index("author", "100$a")
+        .add_index("subject", "650$a")
+        .build_index())
 
     # Each search returns list of record indices
     title_indices = reader.search("245$a", "history")

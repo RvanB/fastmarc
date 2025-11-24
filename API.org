@@ -23,30 +23,31 @@ with open("records.mrc", "rb") as f:
 
 ------
 
-** ~add_index(field_spec, fuzzy=None)~
+** ~add_index(name, field_spec, mode=None)~
 
-Register a field for indexing.
+Register a named index for a field.
 
 *Parameters:*
+- ~name~ (str): Index identifier (used for search operations)
 - ~field_spec~ (str): Field specification
   - Control fields: ~"001"~, ~"008"~
   - Data field subfields: ~"245$a"~, ~"650$a"~
-- ~fuzzy~ (bool, optional):
-  - ~True~: Fuzzy/bitmask (substring search)
-  - ~False~: Exact/hashmap (O(1) lookup)
-  - ~None~: Auto-detect (control=exact, data=fuzzy)
+- ~mode~ (str, optional):
+  - ~"mask"~: Bitmask for substring search (fuzzy matching)
+  - ~"map"~: Hash map for exact lookup (O(1) retrieval)
+  - ~None~: Auto-detect (control="map", data="mask")
 
 *Returns:* ~self~ (for chaining)
 
-*Raises:* ~RuntimeError~ if called after ~.index()~
+*Raises:* ~RuntimeError~ if called after ~.build_index()~
 
 *Example:*
 #+begin_src python
 reader = (MARCReader(fp)
-    .add_index("001")                 # Auto: exact (control field)
-    .add_index("245$a")               # Auto: fuzzy (data field)
-    .add_index("020$a", fuzzy=False)  # Explicit: exact (ISBN)
-    .add_index("650$a", fuzzy=True))  # Explicit: fuzzy (subjects)
+    .add_index("control_num", "001")              # Auto: map (control field)
+    .add_index("title", "245$a")                  # Auto: mask (data field)
+    .add_index("isbn", "020$a", mode="map")       # Explicit: map (ISBN)
+    .add_index("subject", "650$a", mode="mask"))  # Explicit: mask (subjects)
 #+end_src
 
 ------
@@ -67,13 +68,13 @@ Build indexes and execute hooks.
 *Example:*
 #+begin_src python
 # Basic indexing
-reader = MARCReader(fp).add_index("245$a").index()
+reader = MARCReader(fp).add_index("245$a").build_index()
 
 # With custom charset (memory optimization)
-reader = MARCReader(fp).add_index("020$a").index(charset="0123456789")
+reader = MARCReader(fp).add_index("020$a").build_index(charset="0123456789")
 
 # With hooks only (no search index)
-reader = MARCReader(fp).hook("650$a", counter).index()
+reader = MARCReader(fp).hook("650$a", counter).build_index()
 #+end_src
 
 ------
@@ -120,7 +121,7 @@ class FieldCounter:
             self.counts[v] += 1
 
 subjects = FieldCounter()
-reader = MARCReader(fp).hook("650$a", subjects).index()
+reader = MARCReader(fp).hook("650$a", subjects).build_index()
 print(subjects.counts.most_common(10))
 
 # Multi-field hook (fallback logic)
@@ -138,39 +139,44 @@ class YearExtractor:
             self.years[year] += 1
 
 years = YearExtractor()
-reader = MARCReader(fp).hook(["008", "264$c"], years).index()
+reader = MARCReader(fp).hook(["008", "264$c"], years).build_index()
 #+end_src
 
 ------
 
 ** ~search(field_spec, text)~
 
-Search indexed field for matching records.
+Search for records containing text in the specified field.
 
 *Parameters:*
-- ~field_spec~ (str): Field to search (must be indexed)
+- ~field_spec~ (str): Field specification (e.g., ~"245$a"~, ~"001"~)
 - ~text~ (str): Search query
 
 *Returns:* ~list[int]~ - List of matching record indices
 
 *Behavior:*
-- *Fuzzy index*: Case-insensitive substring match
-- *Exact index*: Exact value lookup (returns all collisions)
+- If index exists for field: Uses index (mask or map mode)
+- If no index: Performs sequential scan through all records
+- *Mask mode*: Case-insensitive substring match
+- *Map mode*: Exact value lookup (returns all collisions)
 
-*Raises:* ~RuntimeError~ if ~.index()~ not called or field not indexed
+*Raises:* ~RuntimeError~ if ~.build_index()~ not called
 
 *Example:*
 #+begin_src python
 reader = (MARCReader(fp)
-    .add_index("001", fuzzy=False)
-    .add_index("245$a", fuzzy=True)
-    .index())
+    .add_index("control_num", "001", mode="map")
+    .add_index("title", "245$a", mode="mask")
+    .build_index())
 
-# Exact lookup
-ids = reader.search("001", "12345")  # [0] or [0, 142] if collision
+# Uses map index (fast)
+ids = reader.search("001", "12345")
 
-# Fuzzy search
-results = reader.search("245$a", "music")  # [10, 20, 30, ...]
+# Uses mask index (fast)
+results = reader.search("245$a", "music")
+
+# No index - sequential scan (slower but still works)
+results = reader.search("260$a", "New York")
 #+end_src
 
 ------
@@ -185,31 +191,33 @@ Retrieve record by index.
 *Returns:* ~pymarc.Record~
 
 *Raises:*
-- ~RuntimeError~ if ~.index()~ not called
+- ~RuntimeError~ if ~.build_index()~ not called
 - ~IndexError~ if out of range
 
 *Example:*
 #+begin_src python
-reader = MARCReader(fp).add_index("245$a").index()
+reader = MARCReader(fp).add_index("245$a").build_index()
 record = reader.get_record(0)
 print(record['245']['a'])
 #+end_src
 
 ------
 
-** ~get_exact_index(field_spec)~
+** ~get_index(name)~
 
-Direct access to exact index dictionary.
+Direct access to map index dictionary.
 
 *Parameters:*
-- ~field_spec~ (str): Field specification
+- ~name~ (str): Index name (must be mode="map")
 
 *Returns:* ~dict[str, list[int]]~ - Value → record indices mapping
 
+*Raises:* ~ValueError~ if index not found or not mode="map"
+
 *Example:*
 #+begin_src python
-reader = MARCReader(fp).add_index("245$a", fuzzy=False).index()
-title_index = reader.get_exact_index("245$a")
+reader = MARCReader(fp).add_index("title", "245$a", mode="map").build_index()
+title_index = reader.get_index("title")
 
 # Find duplicates
 for title, indices in title_index.items():
@@ -225,11 +233,11 @@ Get total record count.
 
 *Returns:* ~int~
 
-*Raises:* ~RuntimeError~ if ~.index()~ not called
+*Raises:* ~RuntimeError~ if ~.build_index()~ not called
 
 *Example:*
 #+begin_src python
-reader = MARCReader(fp).add_index("245$a").index()
+reader = MARCReader(fp).add_index("245$a").build_index()
 print(f"{len(reader):,} records")
 #+end_src
 
@@ -241,7 +249,7 @@ Iterate through all records.
 
 *Yields:* ~pymarc.Record~
 
-*Note:* Can iterate without calling ~.index()~ (no hooks/search)
+*Note:* Can iterate without calling ~.build_index()~ (no hooks/search)
 
 *Example:*
 #+begin_src python
