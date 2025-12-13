@@ -132,6 +132,61 @@ class MARCReader:
         """
         ...
 
+    def foreach(
+        self, field_specs: list[str], callable: Any
+    ) -> None:
+        """
+        Execute a callable on specified fields for every record.
+
+        Efficiently loops through all records once, extracting the specified fields
+        and calling the provided callable with a dict of field values for each record.
+        This is more memory-efficient than get_all_values() since values are not
+        accumulated in memory.
+
+        Args:
+            field_specs: List of field specifications (e.g., ["650$a", "008", "264$c"])
+            callable: Python callable that accepts one argument - a dict mapping
+                     field_spec -> list of values for that record
+
+        Returns:
+            None
+
+        Example:
+            ```python
+            from collections import Counter
+
+            # Count all subjects
+            subject_counts = Counter()
+            def count_subjects(fields):
+                for subject in fields.get("650$a", []):
+                    subject_counts[subject.strip()] += 1
+
+            reader.foreach(["650$a"], count_subjects)
+            print(f"Top subjects: {subject_counts.most_common(10)}")
+
+            # Multi-field example: extract years from 008 or 264$c
+            years = Counter()
+            def extract_year(fields):
+                if "008" in fields and fields["008"]:
+                    year = fields["008"][0][7:11]
+                    if year.isdigit():
+                        years[year] += 1
+                elif "264$c" in fields and fields["264$c"]:
+                    import re
+                    match = re.search(r'(19|20)\\d{2}', fields["264$c"][0])
+                    if match:
+                        years[match.group(0)] += 1
+
+            reader.foreach(["008", "264$c"], extract_year)
+            ```
+
+        Note:
+            Does not require .build_index() to be called first. Will build
+            the record offset index if not already built, but does not build
+            search indexes.
+        """
+        ...
+
     def search(self, field_spec: str, text: str) -> list[int]:
         """
         Search for records containing text in the specified field.
@@ -158,8 +213,9 @@ class MARCReader:
         Returns:
             Number of records in the file
 
-        Raises:
-            RuntimeError: If .build_index() not yet called
+        Note:
+            Automatically scans the file to count records if not already done.
+            The count is cached for subsequent calls.
         """
         ...
 

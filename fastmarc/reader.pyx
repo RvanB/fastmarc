@@ -287,6 +287,7 @@ cdef class MARCReader:
     cdef Py_ssize_t _cap
 
     cdef Py_ssize_t _i
+    cdef list _iter_records  # Cached scan results for iteration
     
     # Explicit indexing (inactive until .build_index() is called)
     cdef bint _indexing_enabled        # Set True when user calls .build_index()
@@ -310,6 +311,7 @@ cdef class MARCReader:
         self._n = 0
         self._cap = 0
         self._i = 0
+        self._iter_records = None
 
         # Indexing inactive until .build_index() invoked
         self._indexing_enabled = False
@@ -504,6 +506,14 @@ cdef class MARCReader:
     def __dealloc__(self):
         self.close()
 
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, *args):
+        """Context manager exit - calls close()."""
+        self.close()
+
     cdef void _reserve(self, Py_ssize_t needed):
         """Ensure capacity for at least `needed` items in both arrays."""
         if needed <= self._cap:
@@ -544,11 +554,17 @@ cdef class MARCReader:
         self._lengths[self._n] = L
         self._n += 1
 
-    cdef void _build_index(self):
+    cdef list _scan_records(self):
+        """
+        Scan through all records in the file and return offsets.
+
+        Returns:
+            List of (offset, length) tuples for each record
+        """
         cdef Py_ssize_t i = 0
         cdef Py_ssize_t size = 0
-        cdef Py_ssize_t hint = 0
         cdef int L = 0
+        cdef list records = []
         cdef object mm = None
         cdef const uint8_t[:] buf
 
@@ -557,11 +573,6 @@ cdef class MARCReader:
             mm = mmap.mmap(fileno, 0, access=mmap.ACCESS_READ)
             buf = mm
             size = buf.shape[0]
-
-            # pre-reserve some capacity (rough heuristic)
-            hint = size // 1024
-            if hint > 0:
-                self._reserve(hint)
 
             i = 0
             while i + 5 <= size:
@@ -575,11 +586,11 @@ cdef class MARCReader:
                 if L <= 0 or i + L > size:
                     break
 
-                self._append(<size_t>i, L)
+                records.append((<size_t>i, L))
                 i += L
 
-            self._mm = mm   # keep mmap alive for zero-copy iteration
-            return
+            mm.close()
+            return records
 
         except Exception:
             try:
@@ -587,8 +598,8 @@ cdef class MARCReader:
                     mm.close()
             except Exception:
                 pass
-            self._mm = None
 
+        # Fallback to file reading
         self.fp.seek(0, io.SEEK_SET)
         cdef long pos
         cdef bytes head
@@ -603,35 +614,58 @@ cdef class MARCReader:
                 break
             if L <= 0:
                 break
-            self._append(<size_t>pos, L)
+            records.append((<size_t>pos, L))
             self.fp.seek(L - 5, io.SEEK_CUR)
         self.fp.seek(0, io.SEEK_SET)
+        return records
+
+    cdef void _build_index(self):
+        """Build the record offset index and store in C arrays."""
+        cdef list records = self._scan_records()
+        cdef size_t offset
+        cdef int length
+        cdef Py_ssize_t hint = len(records)
+
+        # Pre-allocate capacity
+        if hint > 0:
+            self._reserve(hint)
+
+        # Try to get mmap for zero-copy access
+        cdef object mm = None
+        try:
+            fileno = self.fp.fileno()
+            mm = mmap.mmap(fileno, 0, access=mmap.ACCESS_READ)
+            self._mm = mm
+        except Exception:
+            self._mm = None
+
+        # Store all records
+        for offset, length in records:
+            self._append(offset, length)
 
     def __iter__(self):
-        # Streaming iteration without indexing execution (unless .build_index() has been called).
+        """Iterate through records without requiring build_index()."""
+        # Scan records if not already done
+        self._iter_records = self._scan_records()
         self._i = 0
         return self
 
     def __next__(self):
+        """Get next record from iteration."""
         cdef Py_ssize_t idx = self._i
         cdef size_t pos
         cdef int L
-        cdef Py_ssize_t p, q
+        cdef bytes raw
 
-        if idx >= self._n:
+        if self._iter_records is None or idx >= len(self._iter_records):
             raise StopIteration
+
         self._i = idx + 1
+        pos, L = self._iter_records[idx]
 
-        pos = self._offsets[idx]
-        L = self._lengths[idx]
-
-        if self._mm is not None:
-            p = <Py_ssize_t>pos
-            q = p + <Py_ssize_t>L
-            raw = bytes(self._mm[p:q])
-        else:
-            self.fp.seek(pos, io.SEEK_SET)
-            raw = self.fp.read(L)
+        # Read the raw MARC data
+        self.fp.seek(pos, io.SEEK_SET)
+        raw = self.fp.read(L)
 
         return pymarc.Record(data=raw)
 
@@ -773,9 +807,120 @@ cdef class MARCReader:
 
         return out
 
-    def __len__(self):
+    def foreach(self, list field_specs, callable):
+        """
+        Execute a callable on specified fields for every record.
+
+        Efficiently loops through all records once, extracting the specified fields
+        and calling the provided callable with a dict of field values for each record.
+        This is more memory-efficient than get_all_values() since values are not
+        accumulated in memory.
+
+        Args:
+            field_specs: List of field specifications (e.g., ["650$a", "008", "264$c"])
+            callable: Python callable that accepts one argument - a dict mapping
+                     field_spec -> list of values for that record
+
+        Returns:
+            None
+
+        Example:
+            from collections import Counter
+
+            # Count all subjects
+            subject_counts = Counter()
+            def count_subjects(fields):
+                for subject in fields.get("650$a", []):
+                    subject_counts[subject.strip()] += 1
+
+            reader.foreach(["650$a"], count_subjects)
+            print(f"Top subjects: {subject_counts.most_common(10)}")
+
+            # Multi-field example: extract years from 008 or 264$c
+            years = Counter()
+            def extract_year(fields):
+                if "008" in fields and fields["008"]:
+                    year = fields["008"][0][7:11]
+                    if year.isdigit():
+                        years[year] += 1
+                elif "264$c" in fields and fields["264$c"]:
+                    import re
+                    match = re.search(r'(19|20)\\d{2}', fields["264$c"][0])
+                    if match:
+                        years[match.group(0)] += 1
+
+            reader.foreach(["008", "264$c"], extract_year)
+
+        Note: Does not require .build_index() to be called first. Will build
+              the record offset index if not already built, but does not build
+              search indexes.
+        """
+        # Build record index if not already built (but not search indexes)
         if not self._index_built:
-            raise RuntimeError("Index not built. Call .build_index() first.")
+            if self._n == 0:
+                self._build_index()
+
+        # If still no records, return early
+        if self._n == 0:
+            return
+
+        # Parse all field specs once
+        cdef list parsed_specs = []
+        cdef bytes tag_bytes
+        cdef char subfield_byte
+        cdef str spec
+
+        for spec in field_specs:
+            if "$" in spec:
+                parts = spec.split("$", 1)
+                tag_bytes = (<str>parts[0]).encode("ascii")
+                subfield_byte = ord((<str>parts[1])[0]) if parts[1] else 0
+            else:
+                tag_bytes = spec.encode("ascii")
+                subfield_byte = 0
+            parsed_specs.append((spec, tag_bytes, subfield_byte))
+
+        # Check if we have mmap available
+        if self._mm is None:
+            # Without mmap, we can't efficiently access records
+            return
+
+        cdef const uint8_t[:] buf = self._mm
+        cdef const uint8_t* rec_ptr
+        cdef int reclen
+        cdef Py_ssize_t i
+        cdef list occurrences
+        cdef dict fields_dict
+        cdef list decoded_values
+
+        # Loop through all records
+        for i in range(self._n):
+            rec_ptr = &buf[self._offsets[i]]
+            reclen = self._lengths[i]
+
+            # Extract all requested fields for this record
+            fields_dict = {}
+            for spec, tag_bytes, subfield_byte in parsed_specs:
+                occurrences = get_subfields(rec_ptr, reclen, tag_bytes, subfield_byte)
+
+                # Decode all occurrences
+                decoded_values = []
+                for raw_val in occurrences:
+                    decoded_values.append(raw_val.decode('utf-8', errors='replace'))
+
+                fields_dict[spec] = decoded_values
+
+            # Call the user's callable with the fields dict
+            callable(fields_dict)
+
+    def __len__(self):
+        # Return cached count if available
+        if self._n > 0:
+            return self._n
+
+        # Otherwise, scan records and cache the count
+        cdef list records = self._scan_records()
+        self._n = len(records)
         return self._n
 
     # ========================================================================
