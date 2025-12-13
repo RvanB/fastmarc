@@ -15,6 +15,9 @@ setup(
     name="fastmarc",
     version="0.1.0",
     packages=["fastmarc"],
+    package_data={
+        "fastmarc": ["py.typed", "*.pyi"],
+    },
     ext_modules=cythonize(
         extensions,
         compiler_directives={
@@ -26,4 +29,5 @@ setup(
         },
     ),
     install_requires=["pymarc>=5.1"],
+    zip_safe=False,
 )
