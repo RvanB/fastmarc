@@ -1,0 +1,2 @@
+include fastmarc/py.typed
+include fastmarc/*.pyi
