@@ -6,7 +6,6 @@ High-performance MARC record reader designed for fast retrieval, search, and ana
 * Features
 
 - *Indexing*: Index for both exact and fuzzy matching, useful for looking up identifiers or searching for text
-- *Field hooks*: Hook your own Python functions into the indexing of MARC fields. Great for analyzing your collection.
 - *Custom charsets*: Optimize memory by adjusting the character set used for indexing.
 - *Optimized for MARC binary*: Taking full advantage of the binary MARC format, fastmarc rips through hundreds of thousands of records in the blink of an eye.
 - *Compatibility with PyMARC*: Returns ~pymarc.Record~ objects for familiar record access
@@ -19,7 +18,6 @@ from fastmarc import MARCReader
 with open("records.mrc", "rb") as f:
     reader = (MARCReader(f)
         .add_index("title", "245$a")     # Register named index
-        .hook("650$a", counter)          # Optional: aggregate
         .build_index())                        # Build index
 
     # Search returns list of record indices
@@ -34,7 +32,7 @@ with open("records.mrc", "rb") as f:
 * Core Workflow
 
 1. *Open* file with ~MARCReader(fp)~
-2. *Register* indexes with ~.add_index()~ and/or hooks with ~.hook()~
+2. *Register* indexes with ~.add_index()~
 3. *Build* with ~.build_index(charset=...)~
 4. *Search* with ~.search()~ or iterate with ~for record in reader~
 
@@ -56,28 +54,26 @@ with open("records.mrc", "rb") as f:
         print(f"Record {idx}: {record['245']['a']}")
 #+end_src
 
-** Subject Analysis with Hooks
+** Subject Analysis
 
 #+begin_src python
 from collections import Counter
-
-class SubjectCounter:
-    def __init__(self):
-        self.counts = Counter()
-
-    def __call__(self, values):
-        for v in values:
-            self.counts[v.strip()] += 1
-
-subjects = SubjectCounter()
+from itertools import chain
 
 with open("records.mrc", "rb") as f:
-    reader = MARCReader(f).hook("650$a", subjects).build_index()
+    reader = MARCReader(f).build_index()
+
+    # Get all subject headings from all records
+    all_subjects = reader.get_all_values("650$a")
+
+    # Flatten the list of lists and count occurrences
+    flattened_subjects = list(chain.from_iterable(all_subjects))
+    subject_counts = Counter(s.strip() for s in flattened_subjects)
 
     print(f"Analyzed {len(reader):,} records")
-    print(f"Unique subjects: {len(subjects.counts)}\n")
+    print(f"Unique subjects: {len(subject_counts)}\n")
 
-    for subject, count in subjects.counts.most_common(10):
+    for subject, count in subject_counts.most_common(10):
         print(f"{count:6d}  {subject}")
 #+end_src
 
@@ -104,37 +100,40 @@ with open("records.mrc", "rb") as f:
 
 #+begin_src python
 from collections import Counter
-
-class YearExtractor:
-    def __init__(self):
-        self.years = Counter()
-        self.source = Counter()
-
-    def __call__(self, fields):
-        year = None
-        if "008" in fields and fields["008"]:
-            year = fields["008"][0][7:11]
-            if year.isdigit():
-                self.source['008'] += 1
-        elif "264$c" in fields:
-            import re
-            match = re.search(r'(19|20)\d{2}', fields["264$c"][0])
-            if match:
-                year = match.group(0)
-                self.source['264$c'] += 1
-
-        if year and year.isdigit():
-            self.years[year] += 1
-
-years = YearExtractor()
+import re
 
 with open("records.mrc", "rb") as f:
-    reader = MARCReader(f).hook(["008", "264$c"], years).build_index()
+    reader = MARCReader(f).build_index()
 
-    print(f"Total years: {sum(years.years.values()):,}")
-    print(f"Sources: {years.source}")
+    # Get all 008 and 264$c values
+    all_008 = reader.get_all_values("008")
+    all_264c = reader.get_all_values("264$c")
+
+    years = Counter()
+    source = Counter()
+
+    # Process each record
+    for i in range(len(reader)):
+        year = None
+        # Try 008 first
+        if all_008[i] and len(all_008[i][0]) >= 11:
+            year = all_008[i][0][7:11]
+            if year.isdigit():
+                source['008'] += 1
+        # Fall back to 264$c
+        elif all_264c[i]:
+            match = re.search(r'(19|20)\d{2}', all_264c[i][0])
+            if match:
+                year = match.group(0)
+                source['264$c'] += 1
+
+        if year and year.isdigit():
+            years[year] += 1
+
+    print(f"Total years: {sum(years.values()):,}")
+    print(f"Sources: {source}")
     print("\nTop 10 years:")
-    for year, count in years.years.most_common(10):
+    for year, count in years.most_common(10):
         print(f"{year}: {count:6d}")
 #+end_src
 
