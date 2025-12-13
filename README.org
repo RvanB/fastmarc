@@ -180,6 +180,59 @@ with open("records.mrc", "rb") as f:
         print(f"  {record['245']['a']}")
 #+end_src
 
+** Extract All Field Values
+
+#+begin_src python
+from collections import Counter
+from itertools import chain
+
+with open(\"records.mrc\", \"rb\") as f:
+    reader = MARCReader(f).build_index()
+
+    # Get all titles - returns list of lists (one per record)
+    all_titles = reader.get_all_values(\"245$a\")
+    print(f\"Total records: {len(all_titles)}\")
+    records_with_titles = sum(1 for titles in all_titles if titles)
+    print(f\"Records with titles: {records_with_titles}\")
+
+    # Get all subject headings (repeating field)
+    all_subjects = reader.get_all_values(\"650$a\")
+
+    # Find records with multiple subjects
+    multi_subject_records = [(i, subs) for i, subs in enumerate(all_subjects) if len(subs) > 3]
+    print(f\"\\nRecords with >3 subjects: {len(multi_subject_records)}\")
+
+    # Flatten and count all subjects
+    flattened_subjects = list(chain.from_iterable(all_subjects))
+    subject_counts = Counter(flattened_subjects)
+    print(f\"Total subject entries: {len(flattened_subjects)}\")
+    print(f\"Unique subjects: {len(subject_counts)}\")
+    print(\"\\nTop 10 subjects:\")
+    for subject, count in subject_counts.most_common(10):
+        print(f\"{count:6d}  {subject}\")
+
+    # Find records missing ISBNs
+    all_isbns = reader.get_all_values(\"020$a\")
+    records_without_isbn = sum(1 for isbns in all_isbns if not isbns)
+    print(f\"\\nRecords without ISBN: {records_without_isbn}\")
+#+end_src
+
+* Development
+
+** Building from Source
+
+For development, you need to rebuild the Cython extension after modifying ~reader.pyx~:
+
+#+begin_src bash
+# Initial setup
+uv pip install -e .
+
+# After modifying reader.pyx, rebuild the extension
+uv run python setup.py build_ext --inplace
+#+end_src
+
+The ~--inplace~ flag puts the compiled ~.so~ file directly in the source tree, so your editable install picks it up immediately.
+
 * Documentation
 - [[file:API.org][API.org]] - Complete API reference
 

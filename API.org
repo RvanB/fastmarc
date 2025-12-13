@@ -227,6 +227,55 @@ for title, indices in title_index.items():
 
 ------
 
+** ~get_all_values(field_spec)~
+
+Extract all values of a field/subfield from every record.
+
+*Parameters:*
+- ~field_spec~ (str): Field specification (e.g., ~"001"~, ~"245$a"~, ~"650$a"~)
+
+*Returns:* ~list[list[str]]~ - List of lists, one per record
+- Outer list length always equals number of records
+- Each inner list contains all occurrences of the field in that record
+- Inner list is empty ~[]~ if record doesn't have the field
+
+*Raises:* ~RuntimeError~ if ~.build_index()~ not called
+
+*Behavior:*
+- Scans through all records sequentially
+- Preserves record-level organization
+- For repeating fields (e.g., ~650$a~), inner lists may have multiple entries
+- Decodes bytes to UTF-8 strings
+
+*Example:*
+#+begin_src python
+reader = MARCReader(fp).build_index()
+
+# Get all titles (one list per record)
+all_titles = reader.get_all_values("245$a")
+print(f"Total records: {len(all_titles)}")
+
+# Count records with titles
+records_with_titles = sum(1 for titles in all_titles if titles)
+print(f"Records with titles: {records_with_titles}")
+
+# Get all subject headings (repeating field)
+all_subjects = reader.get_all_values("650$a")
+
+# Find records with multiple subjects
+for idx, subjects in enumerate(all_subjects):
+    if len(subjects) > 3:
+        record = reader.get_record(idx)
+        print(f"Record {idx} has {len(subjects)} subjects")
+
+# Flatten to get all unique subjects
+from itertools import chain
+unique_subjects = set(chain.from_iterable(all_subjects))
+print(f"Unique subjects: {len(unique_subjects)}")
+#+end_src
+
+------
+
 ** ~__len__()~
 
 Get total record count.
